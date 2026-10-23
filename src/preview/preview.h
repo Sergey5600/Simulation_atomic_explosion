@@ -13,6 +13,7 @@ struct PreviewInput {
     const float* temperature = nullptr;  // optional, Kelvin
     const float* flame = nullptr;        // optional, emission strength
     const float* dust = nullptr;         // optional, optical dust concentration
+    const float* condensate = nullptr;   // optional, cloud water (white)
 };
 
 struct PreviewOptions {

@@ -195,8 +195,22 @@ void compute_fluxes(Device dev, const EulerView ev, ConsPointers flux, const flo
 }  // namespace detail
 
 CompressibleSolver::CompressibleSolver(Device dev, const GridInfo& grid, const Atmosphere& atm,
-                                       const BlastParams& params, const DustParams& dust)
-    : dev_(dev), grid_(grid), params_(params), dust_(dust), ambient_(atm, grid, dev) {
+                                       const BlastParams& params, const DustParams& dust,
+                                       const HumidityProfile& humidity)
+    : dev_(dev), grid_(grid), params_(params), dust_(dust), humidity_(humidity), ambient_(atm, grid, dev) {
+    {
+        std::vector<float> q(std::size_t(grid.dims.z), 0.f);
+        if (humidity.enabled) {
+            for (int k = 0; k < grid.dims.z; ++k) {
+                const float z = grid.origin.z + (k + 0.5f) * grid.dx;
+                const AtmosphereState a = atm.at(z);
+                q[std::size_t(k)] = std::clamp(humidity.relative_humidity_at(z), 0.f, 1.f) *
+                                    saturation_humidity(float(a.temperature), float(a.pressure));
+            }
+        }
+        ambient_qv_.allocate(dev, q.size());
+        ambient_qv_.upload(q.data(), q.size());
+    }
     const std::size_t cells = std::size_t(grid.count());
     const std::size_t faces = max_face_count(grid.dims);
     for (int v = 0; v < kVars; ++v) {
@@ -246,6 +260,9 @@ void CompressibleSolver::reset_to_ambient() {
         e(i, j, k) = p_a[k] / gm1;
     });
     for (int s = 0; s < kScalars; ++s) u_[std::size_t(5 + s)].zero();
+    FieldView qv = var(kVapor);
+    const float* qa = ambient_qv_.data();
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) { qv(i, j, k) = rho_a[k] * qa[k]; });
 }
 
 void CompressibleSolver::set_uniform(float rho, float p) {
@@ -389,6 +406,8 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
     const float ut = dust_.threshold_friction_velocity;
     const float lift = params_.blast_erosion * dt / g.dx;
     const float sp0 = dust_.erosion_split[0], sp1 = dust_.erosion_split[1], sp2 = dust_.erosion_split[2];
+    const bool moist = humidity_.enabled;
+    const int iv = kVapor;
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
@@ -404,6 +423,17 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
             const float e_min = rho * r_gas * fmaxf(ta, 0.5f * t) / (gamma - 1.f);
             const float e_new = fmaxf(eint - rad * ts * ts * ts * ts * dt, e_min);
             u.c[4][c] = ke + e_new;
+        }
+        // Condensation / evaporation in the closed cell (heat capacity at constant volume).
+        if (moist) {
+            const float e_now = u.c[4][c] - ke;
+            const float tc = (gamma - 1.f) * e_now / (rho * r_gas);
+            float qv = u.c[iv][c] / rho, qc = u.c[iv + 1][c] / rho;
+            const float cv = r_gas / (gamma - 1.f);
+            const float dt_latent = saturation_adjust(tc, rho * r_gas * tc, qv, qc, cv);
+            u.c[4][c] += rho * cv * dt_latent;
+            u.c[iv][c] = rho * qv;
+            u.c[iv + 1][c] = rho * qc;
         }
         // Air that has been hotter than the fireball threshold carries the fireball look (and its NO2).
         const float mark = smoothstepf(0.8f * tf, 1.2f * tf, t);
@@ -453,13 +483,15 @@ SIM_INLINE CellState cell_state(FieldView r, FieldView mx, FieldView my, FieldVi
 
 }  // namespace detail
 
-void CompressibleSolver::fill_export(FieldView density, FieldView dust_out, FieldView temperature, FieldView flame,
-                                     FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature) {
+void CompressibleSolver::fill_export(FieldView density, FieldView dust_out, FieldView cond_out, FieldView temperature,
+                                     FieldView flame, FieldView vel_x, FieldView vel_y, FieldView vel_z,
+                                     float flame_temperature) {
     FieldView r = var(0), mx = var(1), my = var(2), mz = var(3), e = var(4), smoke = var(5);
-    FieldView d0 = var(6), d1 = var(7), d2 = var(8);
+    FieldView d0 = var(6), d1 = var(7), d2 = var(8), qc = var(kVapor + 1);
     const float gamma = params_.gamma;
     const float* t_amb = ambient_.temperature.data();
     const float rho_ground = ambient_.ground_density;
+    const float cond_scale = humidity_.enabled ? humidity_.render_scale : 0.f;
     const float inv_tf = 1.f / flame_temperature;
     const float w0 = dust_.optical_weight[0] * dust_.render_scale, w1 = dust_.optical_weight[1] * dust_.render_scale,
                 w2 = dust_.optical_weight[2] * dust_.render_scale;
@@ -470,10 +502,12 @@ void CompressibleSolver::fill_export(FieldView density, FieldView dust_out, Fiel
         const float t = fminf(s.t, 60000.f);
         const float optical_dust = (w0 * d0(i, j, k) + w1 * d1(i, j, k) + w2 * d2(i, j, k)) / rho_ground;
         const float sm = smoke(i, j, k);
+        const float cloud = cond_scale * qc(i, j, k) / rho_ground;
         const bool hot = t > ta + 1.f;
-        const bool active = hot || sm > 1e-4f * s.rho || optical_dust > 1e-4f;
+        const bool active = hot || sm > 1e-4f * s.rho || optical_dust > 1e-4f || cloud > 1e-4f;
         density(i, j, k) = sm / rho_ground;
         dust_out(i, j, k) = optical_dust;
+        cond_out(i, j, k) = cloud;
         temperature(i, j, k) = active ? t : 0.f;
         const float x = t * inv_tf, xa = ta * inv_tf;
         flame(i, j, k) = hot ? fminf(fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f), 60000.f) : 0.f;
@@ -489,7 +523,9 @@ CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
     FieldView d0 = var(6), d1 = var(7), d2 = var(8);
     const Int3 n = grid_.dims;
     FieldView ot{rhs_[0].data(), n}, os{rhs_[1].data(), n}, ou{rhs_[2].data(), n}, ov{rhs_[3].data(), n},
-        ow{rhs_[4].data(), n}, o0{rhs_[5].data(), n}, o1{rhs_[6].data(), n}, o2{rhs_[7].data(), n};
+        ow{rhs_[4].data(), n}, o0{rhs_[5].data(), n}, o1{rhs_[6].data(), n}, o2{rhs_[7].data(), n},
+        oqv{rhs_[8].data(), n}, oqc{rhs_[9].data(), n};
+    FieldView qv = var(kVapor), qc = var(kVapor + 1);
     const float gamma = params_.gamma;
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const detail::CellState s = detail::cell_state(r, mx, my, mz, e, gamma, i, j, k);
@@ -501,6 +537,8 @@ CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
         o0(i, j, k) = d0(i, j, k) / s.rho;
         o1(i, j, k) = d1(i, j, k) / s.rho;
         o2(i, j, k) = d2(i, j, k) / s.rho;
+        oqv(i, j, k) = qv(i, j, k) / s.rho;
+        oqc(i, j, k) = qc(i, j, k) / s.rho;
     });
     HandoffState h;
     h.temperature = rhs_[0].to_host();
@@ -509,6 +547,8 @@ CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
     h.v = rhs_[3].to_host();
     h.w = rhs_[4].to_host();
     for (int b = 0; b < kDustBins; ++b) h.dust[b] = rhs_[std::size_t(5 + b)].to_host();
+    h.vapor = rhs_[8].to_host();
+    h.condensate = rhs_[9].to_host();
     return h;
 }
 

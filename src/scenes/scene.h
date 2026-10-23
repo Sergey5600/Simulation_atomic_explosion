@@ -11,18 +11,19 @@ namespace sim {
 
 // Cell-centred fields every scene fills for export, on the compute device.
 struct ExportBuffers {
-    ScalarField density, dust, temperature, flame, vel_x, vel_y, vel_z;
+    ScalarField density, dust, condensate, temperature, flame, vel_x, vel_y, vel_z;
 
     ExportBuffers(const GridInfo& g, Device dev)
         : density("density", g, dev),
           dust("dust", g, dev),
+          condensate("condensate", g, dev),
           temperature("temperature", g, dev),
           flame("flame", g, dev),
           vel_x("vel_x", g, dev),
           vel_y("vel_y", g, dev),
           vel_z("vel_z", g, dev) {}
 
-    std::size_t memory_bytes() const { return 7 * density.buffer().bytes(); }
+    std::size_t memory_bytes() const { return 8 * density.buffer().bytes(); }
 };
 
 class Scene {

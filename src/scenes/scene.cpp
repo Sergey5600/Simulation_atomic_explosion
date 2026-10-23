@@ -21,6 +21,7 @@ public:
         TestFireballFields f{&out.density, &out.temperature, &out.flame, &out.vel_x, &out.vel_y, &out.vel_z};
         generate_test_fireball(cfg_.test_fireball, cfg_.seed, time_, f);
         out.dust.buffer().zero();
+        out.condensate.buffer().zero();
     }
 
 private:

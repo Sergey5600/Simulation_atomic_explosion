@@ -8,14 +8,16 @@
 //
 // Boundaries: the ground (z = 0) reflects, the sides and the top let waves out.
 // Transported scalars: the fireball-gas marker ("smoke": air that has been
-// hotter than ~2000 K, i.e. the luminous fireball and its NO2) and the dust
-// bins, lifted from the ground by the blast wind.
+// hotter than ~2000 K, i.e. the luminous fireball and its NO2), the dust
+// bins, lifted from the ground by the blast wind, and water vapour / cloud
+// water (the Wilson cloud forms where the blast's negative phase cools humid air).
 
 #include <vector>
 
 #include "core/grid.h"
 #include "lowmach/solver.h"
 #include "physics/atmosphere.h"
+#include "physics/humidity.h"
 
 namespace sim {
 
@@ -42,11 +44,12 @@ struct BlastParams {
 
 class CompressibleSolver {
 public:
-    static constexpr int kScalars = 1 + kDustBins;  // smoke + dust bins
+    static constexpr int kScalars = 1 + kDustBins + 2;  // smoke, dust bins, vapour, cloud water
+    static constexpr int kVapor = 5 + 1 + kDustBins;    // conserved-variable index of rho * qv
     static constexpr int kVars = 5 + kScalars;      // rho, rho u, rho v, rho w, E, rho Y...
 
     CompressibleSolver(Device dev, const GridInfo& grid, const Atmosphere& atm, const BlastParams& params,
-                       const DustParams& dust);
+                       const DustParams& dust, const HumidityProfile& humidity = HumidityProfile{});
 
     // Ambient atmosphere at rest (no wind: it is irrelevant within one second).
     void reset_to_ambient();
@@ -59,12 +62,12 @@ public:
     void step(double dt);
 
     // Same fields as LowMachSolver::fill_export.
-    void fill_export(FieldView density, FieldView dust, FieldView temperature, FieldView flame, FieldView vel_x,
-                     FieldView vel_y, FieldView vel_z, float flame_temperature);
+    void fill_export(FieldView density, FieldView dust, FieldView condensate, FieldView temperature, FieldView flame,
+                     FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature);
 
     // State for the handoff to the low-Mach solver, on the host (cell centred).
     struct HandoffState {
-        std::vector<float> temperature, smoke, u, v, w;
+        std::vector<float> temperature, smoke, u, v, w, vapor, condensate;
         std::vector<float> dust[kDustBins];
     };
     HandoffState handoff_state();
@@ -91,7 +94,9 @@ private:
     GridInfo grid_;
     BlastParams params_;
     DustParams dust_;
+    HumidityProfile humidity_;
     AtmosphereColumns ambient_;
+    Buffer<float> ambient_qv_;  // ambient specific humidity per level (zeros without moisture)
     Buffer<float> rho0_c_, p0_c_, rho0_f_, p0_f_;  // hydrostatic background at cell centres / z-faces
 
 public:

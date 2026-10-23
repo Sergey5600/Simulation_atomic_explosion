@@ -25,7 +25,7 @@ bool wants(const std::vector<std::string>& fields, const char* name) {
 }
 
 void validate_fields(const std::vector<std::string>& fields) {
-    static const char* known[] = {"density", "dust", "temperature", "flame", "velocity"};
+    static const char* known[] = {"density", "dust", "condensate", "temperature", "flame", "velocity"};
     for (const std::string& f : fields) {
         if (std::none_of(std::begin(known), std::end(known), [&](const char* k) { return f == k; })) {
             throw std::runtime_error("unknown output field '" + f + "'");
@@ -113,7 +113,7 @@ int run_scene(const RunOptions& opt) {
     }
 
     const std::size_t n = std::size_t(g.count());
-    std::vector<float> h_density(n), h_dust(n), h_temperature(n), h_flame(n), h_vx(n), h_vy(n), h_vz(n);
+    std::vector<float> h_density(n), h_dust(n), h_cond(n), h_temperature(n), h_flame(n), h_vx(n), h_vy(n), h_vz(n);
 
     Manifest manifest;
     manifest.scene_name = cfg.name;
@@ -148,6 +148,7 @@ int run_scene(const RunOptions& opt) {
         step.reset();
         exp.density.buffer().download(h_density.data(), n);
         exp.dust.buffer().download(h_dust.data(), n);
+        exp.condensate.buffer().download(h_cond.data(), n);
         exp.temperature.buffer().download(h_temperature.data(), n);
         exp.flame.buffer().download(h_flame.data(), n);
         exp.vel_x.buffer().download(h_vx.data(), n);
@@ -159,6 +160,7 @@ int run_scene(const RunOptions& opt) {
         frame.grid = fg;
         if (wants(cfg.output.fields, "density")) frame.scalars.push_back({"density", h_density.data()});
         if (wants(cfg.output.fields, "dust")) frame.scalars.push_back({"dust", h_dust.data()});
+        if (wants(cfg.output.fields, "condensate")) frame.scalars.push_back({"condensate", h_cond.data()});
         if (wants(cfg.output.fields, "temperature")) frame.scalars.push_back({"temperature", h_temperature.data()});
         if (wants(cfg.output.fields, "flame")) frame.scalars.push_back({"flame", h_flame.data()});
         if (wants(cfg.output.fields, "velocity")) {
@@ -183,6 +185,19 @@ int run_scene(const RunOptions& opt) {
         mf.domain_max = (fg.origin + fg.extent()) * cfg.output.world_scale;
         measure_light(fg, h_flame, mf.light_position, mf.light_power);
         measure_cloud(fg, h_density, h_dust, h_flame, mf.cloud_min, mf.cloud_max);
+        {
+            Float3 lo, hi;  // cloud water counts as visible too
+            measure_cloud(fg, h_cond, h_cond, h_cond, lo, hi);
+            if (hi.z > lo.z) {
+                if (mf.cloud_max.z > mf.cloud_min.z) {
+                    mf.cloud_min = Float3{std::min(lo.x, mf.cloud_min.x), std::min(lo.y, mf.cloud_min.y), std::min(lo.z, mf.cloud_min.z)};
+                    mf.cloud_max = Float3{std::max(hi.x, mf.cloud_max.x), std::max(hi.y, mf.cloud_max.y), std::max(hi.z, mf.cloud_max.z)};
+                } else {
+                    mf.cloud_min = lo;
+                    mf.cloud_max = hi;
+                }
+            }
+        }
         mf.cloud_min = mf.cloud_min * cfg.output.world_scale;
         mf.cloud_max = mf.cloud_max * cfg.output.world_scale;
         mf.light_position = mf.light_position * cfg.output.world_scale;
@@ -194,7 +209,7 @@ int run_scene(const RunOptions& opt) {
         if (cfg.output.preview_every > 0 && (f % std::size_t(cfg.output.preview_every) == 0 || f + 1 == times.size())) {
             char name[32];
             std::snprintf(name, sizeof(name), "preview_%04d.png", number);
-            PreviewInput pin{fg, h_density.data(), h_temperature.data(), h_flame.data(), h_dust.data()};
+            PreviewInput pin{fg, h_density.data(), h_temperature.data(), h_flame.data(), h_dust.data(), h_cond.data()};
             render_preview_png((preview_dir / name).string(), pin, PreviewOptions{});
         }
         t_io += step.seconds();

@@ -48,7 +48,7 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
                 for (int i = 0; i < g.dims.x; ++i) {
                     const std::int64_t idx = g.index(i, j, k);
                     const bool visible = (in.density && in.density[idx] > 1e-3f) || (in.flame && in.flame[idx] > 1e-4f) ||
-                                         (in.dust && in.dust[idx] > 1e-3f);
+                                         (in.dust && in.dust[idx] > 1e-3f) || (in.condensate && in.condensate[idx] > 1e-3f);
                     if (!visible) continue;
                     lo = std::min(lo, i);
                     hi = std::max(hi, i);
@@ -69,6 +69,7 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
 
     const Rgb smoke{0.55f, 0.50f, 0.46f};
     const Rgb sand{0.80f, 0.68f, 0.52f};
+    const Rgb water{0.95f, 0.96f, 0.98f};
     const Rgb ambient{0.75f, 0.85f, 1.0f};
 
 #pragma omp parallel for schedule(dynamic, 4)
@@ -81,13 +82,15 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
                 const std::int64_t idx = g.index(i, j, k);
                 const float ds = in.density ? std::max(in.density[idx], 0.f) : 0.f;
                 const float dd = in.dust ? std::max(in.dust[idx], 0.f) : 0.f;
+                const float dc = in.condensate ? std::max(in.condensate[idx], 0.f) : 0.f;
                 const float f = in.flame ? std::max(in.flame[idx], 0.f) : 0.f;
-                const float d = ds + dd;
+                const float d = ds + dd + dc;
                 if (d <= 0.f && f <= 0.f) continue;
                 const float alpha = 1.f - std::exp(-d * opt.density_scale * g.dx);
-                const float dust_frac = d > 0.f ? dd / d : 0.f;
-                const Rgb albedo{smoke.r + (sand.r - smoke.r) * dust_frac, smoke.g + (sand.g - smoke.g) * dust_frac,
-                                 smoke.b + (sand.b - smoke.b) * dust_frac};
+                const float inv = d > 0.f ? 1.f / d : 0.f;
+                const Rgb albedo{(ds * smoke.r + dd * sand.r + dc * water.r) * inv,
+                                 (ds * smoke.g + dd * sand.g + dc * water.g) * inv,
+                                 (ds * smoke.b + dd * sand.b + dc * water.b) * inv};
                 Rgb e;
                 if (f > 0.f) {
                     const Rgb bb = blackbody_rgb(in.temperature ? in.temperature[idx] : 3000.f);

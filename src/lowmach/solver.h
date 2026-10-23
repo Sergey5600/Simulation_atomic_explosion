@@ -15,6 +15,8 @@
 //   Dtheta/Dt = radiative cooling only (adiabatic motion conserves theta)
 //   dust: carried by the flow, falls at its settling speed, lifted from the
 //         ground where the near-surface wind exceeds the erosion threshold
+//   moisture (optional): vapour and cloud water, saturation adjustment with latent heat;
+//         vapour lightens the air (virtual temperature), cloud water weighs it down
 
 #include <memory>
 #include <vector>
@@ -24,6 +26,7 @@
 #include "lowmach/mac.h"
 #include "lowmach/pressure.h"
 #include "physics/atmosphere.h"
+#include "physics/humidity.h"
 #include "physics/wind.h"
 
 namespace sim {
@@ -84,7 +87,8 @@ struct StepStats {
 class LowMachSolver {
 public:
     LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere& atm, const SolverParams& params,
-                  const RadiationParams& radiation, const DustParams& dust = DustParams{});
+                  const RadiationParams& radiation, const DustParams& dust = DustParams{},
+                  const HumidityProfile& humidity = HumidityProfile{});
 
     // Ambient atmosphere at rest plus the wind profile; no smoke or dust.
     void reset_to_ambient(const WindProfile& wind);
@@ -101,7 +105,8 @@ public:
     // velocity is moved to the faces and projected.
     void load_cell_state(const std::vector<float>& temperature, const std::vector<float>& smoke,
                          const std::vector<float>* dust_bins, const std::vector<float>& u,
-                         const std::vector<float>& v, const std::vector<float>& w);
+                         const std::vector<float>& v, const std::vector<float>& w,
+                         const std::vector<float>* vapor = nullptr, const std::vector<float>* condensate = nullptr);
 
     // Largest stable time step for the current state (capped by params.max_dt).
     double suggest_dt();
@@ -110,8 +115,8 @@ public:
     // Cell-centred export fields: density = smoke mass concentration relative to ground air,
     // dust = optical dust concentration (see DustParams::render_scale), temperature in K
     // (0 where ambient), flame = (T / flame_temperature)^4 above ambient.
-    void fill_export(FieldView density, FieldView dust, FieldView temperature, FieldView flame, FieldView vel_x,
-                     FieldView vel_y, FieldView vel_z, float flame_temperature);
+    void fill_export(FieldView density, FieldView dust, FieldView condensate, FieldView temperature, FieldView flame,
+                     FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature);
 
     float max_temperature();
     float max_speed();
@@ -123,6 +128,10 @@ public:
     FieldView smoke() { return scalar(kSmoke); }
     bool has_dust() const { return dust_.enabled; }
     FieldView dust(int bin) { return scalar(kDust0 + bin); }
+    bool has_moisture() const { return humidity_.enabled; }
+    FieldView vapor() { return scalar(vapor_index_); }
+    FieldView condensate() { return scalar(vapor_index_ + 1); }
+    double condensate_tonnes();
     MacField& velocity() { return vel_; }
     const AtmosphereColumns& ambient() const { return ambient_; }
     const DustParams& dust_params() const { return dust_; }
@@ -145,6 +154,14 @@ public:
     };
     DustPointers dust_pointers();
 
+    // Vapour and cloud water arrays (null without moisture) and the ambient vapour column.
+    struct MoisturePointers {
+        float* qv = nullptr;
+        float* qc = nullptr;
+        const float* qv_ambient = nullptr;
+    };
+    MoisturePointers moisture_pointers();
+
 private:
     static constexpr int kTheta = 0, kSmoke = 1, kDust0 = 2;
     FieldView scalar(int i) { return {scalars_[std::size_t(i)].data(), grid_.dims}; }
@@ -156,6 +173,9 @@ private:
     DustParams dust_;
     Atmosphere atmosphere_;
     WindProfile wind_;
+    HumidityProfile humidity_;
+    int vapor_index_ = -1;      // vapour, then cloud water right after it
+    Buffer<float> ambient_qv_;  // ambient specific humidity per level
     AtmosphereColumns ambient_;
     Buffer<float> wind_u_, wind_v_;  // ambient wind per level, for the current grid
 

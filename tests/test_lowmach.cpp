@@ -12,6 +12,7 @@
 #include "lowmach/solver.h"
 #include "physics/atmosphere.h"
 #include "physics/constants.h"
+#include "physics/humidity.h"
 #include "scenes/fireball_rise.h"
 
 using namespace sim;
@@ -270,10 +271,11 @@ TEST_CASE("hot fireball rises and cools") {
         init_fireball(solver, fb, 3);
 
         auto hot_centroid_z = [&]() {
-            ScalarField d("d", g, solver.device()), du("du", g, solver.device()), t("t", g, solver.device()),
-                f("f", g, solver.device()), vx("vx", g, solver.device()), vy("vy", g, solver.device()),
-                vz("vz", g, solver.device());
-            solver.fill_export(d.view(), du.view(), t.view(), f.view(), vx.view(), vy.view(), vz.view(), 6000.f);
+            ScalarField d("d", g, solver.device()), du("du", g, solver.device()), qc("qc", g, solver.device()),
+                t("t", g, solver.device()), f("f", g, solver.device()), vx("vx", g, solver.device()),
+                vy("vy", g, solver.device()), vz("vz", g, solver.device());
+            solver.fill_export(d.view(), du.view(), qc.view(), t.view(), f.view(), vx.view(), vy.view(), vz.view(),
+                               6000.f);
             const std::vector<float> dens = d.buffer().to_host();
             double m = 0.0, z = 0.0;
             for (int k = 0; k < g.dims.z; ++k)
@@ -451,4 +453,66 @@ TEST_CASE("growing the domain keeps the cloud and doubles the extent") {
     // And it keeps running.
     for (int s = 0; s < 4; ++s) solver.step(solver.suggest_dt());
     CHECK(std::isfinite(solver.max_speed()));
+}
+
+TEST_CASE("saturation humidity matches tables") {
+    // 20 C at 1000 hPa: about 14.7 g/kg; 0 C: about 3.8 g/kg.
+    CHECK(saturation_humidity(293.15f, 100000.f) == doctest::Approx(0.0147).epsilon(0.03));
+    CHECK(saturation_humidity(273.15f, 100000.f) == doctest::Approx(0.00379).epsilon(0.03));
+    // Inside the fireball it stays finite and nothing condenses.
+    float qv = 0.01f, qc = 0.f;
+    const float dt = saturation_adjust(3000.f, 87000.f, qv, qc, 1004.f);
+    CHECK(qc == 0.f);
+    CHECK(dt == 0.f);
+}
+
+namespace {
+HumidityProfile moist(float rh) {
+    HumidityProfile h;
+    h.enabled = true;
+    h.points = {{0.f, rh}, {5000.f, rh}};
+    return h;
+}
+}  // namespace
+
+TEST_CASE("humid atmosphere at rest stays at rest and clear") {
+    GridInfo g;
+    g.dims = Int3{16, 16, 32};
+    g.dx = 100.f;
+    g.origin = Float3{-800.f, -800.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, DustParams{}, moist(0.8f));
+    solver.reset_to_ambient(WindProfile{});
+    for (int s = 0; s < 5; ++s) solver.step(1.0);
+    CHECK(solver.max_speed() < 1e-3f);
+    CHECK(solver.condensate_tonnes() == 0.0);
+}
+
+TEST_CASE("air pushed up by a rising bubble condenses") {
+    GridInfo g;
+    g.dims = Int3{16, 16, 48};
+    g.dx = 25.f;
+    g.origin = Float3{-200.f, -200.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    for (int moisture = 0; moisture < 2; ++moisture) {
+        LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, DustParams{},
+                             moisture ? moist(0.995f) : HumidityProfile{});
+        solver.reset_to_ambient(WindProfile{});
+        FireballConfig fb;
+        fb.radius = 80.f;
+        fb.temperature = 600.f;  // rises fast and lifts the near-saturated air around it
+        fb.noise_amplitude = 0.f;
+        init_fireball(solver, fb, 9);
+        for (double t = 0.0; t < 40.0;) {
+            const double dt = solver.suggest_dt();
+            solver.step(dt);
+            t += dt;
+        }
+        const double water = solver.condensate_tonnes();
+        MESSAGE("moisture " << moisture << ": cloud water " << water << " t, smoke centroid "
+                            << solver.diagnostics().centroid_z << " m");
+        if (moisture) CHECK(water > 0.1);
+        else CHECK(water == 0.0);
+        CHECK(std::isfinite(solver.max_speed()));
+    }
 }

@@ -166,3 +166,33 @@ TEST_CASE("surface burst scene hands off to the buoyant phase") {
     CHECK(finite);
     CHECK(tmax > 400.f);
 }
+
+TEST_CASE("the blast's negative phase condenses humid air (Wilson cloud)") {
+    GridInfo g;
+    g.dims = Int3{48, 48, 24};
+    g.dx = 8.f;
+    g.origin = Float3{-192.f, -192.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    BlastParams p;
+    p.yield_kt = 0.3f;
+    p.deposit_radius = 20.f;
+    p.blast_erosion = 0.f;
+    HumidityProfile h;
+    h.enabled = true;
+    h.points = {{0.f, 0.97f}, {1000.f, 0.97f}};
+    CompressibleSolver s(test_device(), g, atm, p, DustParams{}, h);
+    s.reset_to_ambient();
+    s.deposit_energy(3);
+    double peak = 0.0;
+    for (double t = 0.0; t < 0.25;) {
+        const double dt = s.suggest_dt();
+        s.step(dt);
+        t += dt;
+        const std::vector<float> qc = download(s, CompressibleSolver::kVapor + 1);
+        double sum = 0.0;
+        for (float v : qc) sum += v;
+        peak = std::max(peak, sum);
+    }
+    MESSAGE("peak cloud water (sum of rho qc): " << peak);
+    CHECK(peak > 1e-4);
+}

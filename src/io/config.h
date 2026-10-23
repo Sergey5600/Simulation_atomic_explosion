@@ -90,6 +90,7 @@ struct SceneConfig {
     DustInitConfig dust_init;
     DomainConfig domain;
     BlastParams blast;
+    HumidityProfile humidity;
 };
 
 SceneConfig load_scene(const std::string& path);

@@ -16,7 +16,7 @@ namespace {
 class SurfaceBurstScene final : public Scene {
 public:
     SurfaceBurstScene(const SceneConfig& cfg, Device dev) : cfg_(cfg), dev_(dev), atmosphere_(cfg.atmosphere) {
-        blast_ = std::make_unique<CompressibleSolver>(dev, cfg.grid, atmosphere_, cfg.blast, cfg.dust);
+        blast_ = std::make_unique<CompressibleSolver>(dev, cfg.grid, atmosphere_, cfg.blast, cfg.dust, cfg.humidity);
         blast_->reset_to_ambient();
         blast_->deposit_energy(cfg.seed);
         time_ = cfg.blast.start_time;
@@ -50,8 +50,9 @@ public:
 
     void fill_export(ExportBuffers& out) override {
         if (blast_) {
-            blast_->fill_export(out.density.view(), out.dust.view(), out.temperature.view(), out.flame.view(),
-                                out.vel_x.view(), out.vel_y.view(), out.vel_z.view(), cfg_.fireball.flame_temperature);
+            blast_->fill_export(out.density.view(), out.dust.view(), out.condensate.view(), out.temperature.view(),
+                                out.flame.view(), out.vel_x.view(), out.vel_y.view(), out.vel_z.view(),
+                                cfg_.fireball.flame_temperature);
         } else {
             rise_->fill_export(out);
         }
@@ -89,7 +90,7 @@ private:
                 }
         }
         rise_ = std::make_unique<RisePhase>(cfg_, dev_, atmosphere_);
-        rise_->solver().load_cell_state(h.temperature, h.smoke, h.dust, h.u, h.v, h.w);
+        rise_->solver().load_cell_state(h.temperature, h.smoke, h.dust, h.u, h.v, h.w, &h.vapor, &h.condensate);
         rise_->set_time(time_);
     }
 

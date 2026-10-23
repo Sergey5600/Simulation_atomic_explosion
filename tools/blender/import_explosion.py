@@ -12,6 +12,7 @@ Options (after the "--"):
     --dir DIR            folder with manifest.json and the .vdb files
     --density X          smoke density multiplier (default 0.2)
     --dust X             dust density multiplier (default 0.2)
+    --condensate X       cloud-water density multiplier (default 0.1)
     --emission X         fireball emission multiplier (default 0.05)
     --light-power W      peak power of the fireball point light in watts (default 5e9)
     --no-light           do not create the fireball light
@@ -41,6 +42,7 @@ def parse_args():
     p.add_argument("--dir", default=DEFAULT_DIR)
     p.add_argument("--density", type=float, default=0.2)
     p.add_argument("--dust", type=float, default=0.2)
+    p.add_argument("--condensate", type=float, default=0.1)
     p.add_argument("--emission", type=float, default=0.05)
     p.add_argument("--light-power", type=float, default=5e9)
     p.add_argument("--no-light", action="store_true")
@@ -133,6 +135,7 @@ def import_volume(folder, manifest):
 # Fireball gas is shock-heated air full of nitrogen dioxide: the pinkish-brown of real caps.
 SMOKE_COLOR = (0.62, 0.36, 0.30, 1.0)
 DUST_COLOR = (0.78, 0.66, 0.50, 1.0)  # desert sand
+WATER_COLOR = (0.96, 0.97, 0.98, 1.0)  # cloud droplets scatter almost all light
 
 
 def build_material(args, world_scale, fields):
@@ -183,30 +186,44 @@ def build_material(args, world_scale, fields):
     # Exported values are per metre; convert to per Blender unit.
     dens = attribute("density", 300)
     smoke = multiply(dens.outputs["Fac"], args.density / world_scale, 300, "Density")
-    if "dust" in fields:
-        # Smoke and sand share one volume: densities add, the colour follows the dust fraction.
-        dust_attr = attribute("dust", 100)
-        dust = multiply(dust_attr.outputs["Fac"], args.dust / world_scale, 100, "Dust")
-        total = math("ADD", smoke, dust, 250, "Total density")
-        nt.links.new(total, find_input(pv, ["Density"]))
-        frac = math("DIVIDE", dust, math("ADD", total, 1e-6, 150), 50, "Dust fraction")
+
+    def by_id(sockets, identifier):
+        return next(sk for sk in sockets if sk.identifier == identifier)
+
+    def mix_color(fac, a, b, y):
         mix = nt.nodes.new("ShaderNodeMix")
         mix.data_type = "RGBA"
-        mix.location = (200, 150)
+        mix.location = (250, y)
+        nt.links.new(fac, by_id(mix.inputs, "Factor_Float"))
+        for ident, value in (("A_Color", a), ("B_Color", b)):
+            if isinstance(value, tuple):
+                by_id(mix.inputs, ident).default_value = value
+            else:
+                nt.links.new(value, by_id(mix.inputs, ident))
+        return by_id(mix.outputs, "Result_Color")
 
-        def by_id(sockets, identifier):
-            return next(sk for sk in sockets if sk.identifier == identifier)
-
-        nt.links.new(frac, by_id(mix.inputs, "Factor_Float"))
-        by_id(mix.inputs, "A_Color").default_value = SMOKE_COLOR
-        by_id(mix.inputs, "B_Color").default_value = DUST_COLOR
-        nt.links.new(by_id(mix.outputs, "Result_Color"), find_input(pv, ["Color"]))
+    # Smoke, sand and cloud water share one volume: densities add, the colour is the
+    # density-weighted mix of the three.
+    total = smoke
+    color = None
+    if "dust" in fields:
+        dust_attr = attribute("dust", 100)
+        dust = multiply(dust_attr.outputs["Fac"], args.dust / world_scale, 100, "Dust")
+        total = math("ADD", smoke, dust, 250, "Smoke + dust")
+        frac = math("DIVIDE", dust, math("ADD", total, 1e-6, 150), 50, "Dust fraction")
+        color = mix_color(frac, SMOKE_COLOR, DUST_COLOR, 150)
+    if "condensate" in fields:
+        cond_attr = attribute("condensate", -50)
+        cond = multiply(cond_attr.outputs["Fac"], args.condensate / world_scale, -50, "Cloud water")
+        dry = total
+        total = math("ADD", dry, cond, 0, "Total density")
+        frac = math("DIVIDE", cond, math("ADD", total, 1e-6, -100), -50, "Water fraction")
+        color = mix_color(frac, color if color is not None else SMOKE_COLOR, WATER_COLOR, 0)
+    nt.links.new(total, find_input(pv, ["Density"]))
+    if color is not None:
+        nt.links.new(color, find_input(pv, ["Color"]))
     else:
-        nt.links.new(smoke, find_input(pv, ["Density"]))
         set_input(pv, ["Color"], SMOKE_COLOR)
-    set_input(pv, ["Absorption Color"], (0.05, 0.04, 0.035, 1.0))
-    set_input(pv, ["Anisotropy"], 0.3)
-
     temp = attribute("temperature", -100)
     bb = nt.nodes.new("ShaderNodeBlackbody")
     bb.location = (-150, -100)

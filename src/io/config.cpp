@@ -214,6 +214,22 @@ void parse_blast(const toml::table& t, BlastParams& b) {
     }
 }
 
+void parse_humidity(const toml::table& t, HumidityProfile& h) {
+    h.enabled = get_or<bool>(t, "enabled", true);
+    h.render_scale = float(get_or<double>(t, "render_scale", h.render_scale));
+    if (const auto* arr = t.get_as<toml::array>("profile")) {
+        for (const auto& el : *arr) {
+            const auto* pair = el.as_array();
+            if (!pair || pair->size() != 2) fail("humidity.profile entries must be [height, relative humidity] pairs");
+            const auto z = (*pair)[0].value<double>(), rh = (*pair)[1].value<double>();
+            if (!z || !rh) fail("humidity.profile entries must be numbers");
+            if (*rh < 0.0 || *rh > 1.0) fail("humidity.profile relative humidity must be between 0 and 1");
+            if (!h.points.empty() && *z <= h.points.back().first) fail("humidity.profile heights must increase");
+            h.points.emplace_back(float(*z), float(*rh));
+        }
+    }
+}
+
 void parse_solver(const toml::table& t, SolverParams& c) {
     c.cfl = float(get_or<double>(t, "cfl", c.cfl));
     c.max_dt = float(get_or<double>(t, "max_dt", c.max_dt));
@@ -263,6 +279,7 @@ SceneConfig load_scene(const std::string& path) {
     if (const auto* t = subtable(root, "dust")) parse_dust(*t, cfg.dust, cfg.dust_init);
     if (const auto* t = subtable(root, "domain")) parse_domain(*t, cfg.domain);
     if (const auto* t = subtable(root, "blast")) parse_blast(*t, cfg.blast);
+    if (const auto* t = subtable(root, "humidity")) parse_humidity(*t, cfg.humidity);
     return cfg;
 }
 

@@ -62,7 +62,7 @@ void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const Dust
 }
 
 RisePhase::RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm)
-    : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust) {
+    : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust, cfg.humidity) {
     solver_.reset_to_ambient(cfg.wind);
     if (cfg.domain.expand && !LowMachSolver::can_coarsen(cfg.grid.dims)) {
         log_warn("domain.expand needs grid x, y divisible by 4 and z by 2: the domain will not grow");
@@ -93,8 +93,9 @@ void RisePhase::advance_to(double t) {
 }
 
 void RisePhase::fill_export(ExportBuffers& out) {
-    solver_.fill_export(out.density.view(), out.dust.view(), out.temperature.view(), out.flame.view(),
-                        out.vel_x.view(), out.vel_y.view(), out.vel_z.view(), cfg_.fireball.flame_temperature);
+    solver_.fill_export(out.density.view(), out.dust.view(), out.condensate.view(), out.temperature.view(),
+                        out.flame.view(), out.vel_x.view(), out.vel_y.view(), out.vel_z.view(),
+                        cfg_.fireball.flame_temperature);
 }
 
 std::string RisePhase::status() {
@@ -102,10 +103,10 @@ std::string RisePhase::status() {
     char buf[256];
     std::snprintf(buf, sizeof(buf),
                   "steps=%d dt=%.3fs pcg=%.1f it/solve res=%.1e | Tmax=%.0fK top=%.0fm centroid=%.0fm "
-                  "|u|max=%.0fm/s at z=%.0fm dust=%.0ft",
+                  "|u|max=%.0fm/s at z=%.0fm dust=%.0ft cloud water=%.0ft",
                   steps_, last_dt_, projections_ ? double(iterations_) / projections_ : 0.0, residual_,
                   double(solver_.max_temperature()), double(d.top), double(d.centroid_z), double(d.max_speed),
-                  double(d.max_speed_z), d.dust_tonnes);
+                  double(d.max_speed_z), d.dust_tonnes, solver_.condensate_tonnes());
     return buf;
 }
 
