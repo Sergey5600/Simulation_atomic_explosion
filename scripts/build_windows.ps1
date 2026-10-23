@@ -3,7 +3,7 @@
     Builds NukeSim on Windows in one go.
 
 .DESCRIPTION
-    1. Finds Visual Studio 2022 and enters its x64 developer environment
+    1. Finds Visual Studio 2022 or 2026 and enters its x64 developer environment
        (this puts cl, cmake, ninja and ctest on PATH).
     2. Finds the CUDA Toolkit (CUDA_PATH); falls back to a CPU-only build without it.
     3. Finds or installs vcpkg (C:\vcpkg by default) and sets VCPKG_ROOT.
@@ -69,20 +69,21 @@ function Run([string]$exe, [string[]]$arguments) {
 }
 
 # ---------------------------------------------------------------------------
-Step "Visual Studio 2022"
+Step "Visual Studio"
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere)) {
-    Fail "Visual Studio Installer not found. Install Visual Studio 2022 with the 'Desktop development with C++' workload."
+    Fail "Visual Studio Installer not found. Install Visual Studio 2022 or 2026 with the 'Desktop development with C++' workload."
 }
-$vs = & $vswhere -latest -products * -version '[17.0,18.0)' `
+$vs = & $vswhere -latest -products * -version '[17.0,19.0)' `
     -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (-not $vs) {
-    Fail "Visual Studio 2022 with C++ tools not found. In Visual Studio Installer add the 'Desktop development with C++' workload."
+    Fail "Visual Studio 2022/2026 with C++ tools not found. In Visual Studio Installer add the 'Desktop development with C++' workload."
 }
 Info $vs
 Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
 Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
 Set-Location $repo
+Info "MSVC toolset $env:VCToolsVersion"
 
 $cmakeCmd = Get-Command cmake -ErrorAction SilentlyContinue
 if (-not $cmakeCmd) {
@@ -113,6 +114,12 @@ if ($Cpu) {
     } else {
         $env:CUDACXX = $nvcc
         Info ((& $nvcc --version | Select-Object -Last 2) -join ' ')
+        # CUDA 13.4 accepts MSVC up to 14.5x (VS 2026). A newer toolset from a VS update
+        # usually still works but nvcc refuses it unless told otherwise.
+        if ($env:VCToolsVersion -match '^14\.(\d+)' -and [int]$Matches[1] -ge 60) {
+            Write-Warning "MSVC $env:VCToolsVersion is newer than this CUDA version officially supports; adding -allow-unsupported-compiler"
+            $env:NVCC_APPEND_FLAGS = '-allow-unsupported-compiler'
+        }
     }
 }
 

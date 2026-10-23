@@ -9,7 +9,7 @@
 ## Сборка на Windows
 
 Нужно:
-- Visual Studio 2022 с компонентом «Desktop development with C++» (в него входят CMake и Ninja);
+- Visual Studio 2022 или 2026 с компонентом «Desktop development with C++» (в него входят CMake и Ninja);
 - CUDA Toolkit 13.x;
 - Git;
 - Blender 5.2.
@@ -75,7 +75,7 @@ vcpkg ставить вручную не надо, скрипт сделает �
 
 ### Сборка из Visual Studio (по желанию)
 
-Preset `windows` использует генератор Visual Studio. Для него нужна интеграция CUDA с VS, она ставится вместе с CUDA Toolkit. Скрипт `build_windows.bat` использует Ninja, ему эта интеграция не нужна.
+Preset `windows` использует генератор Visual Studio 2022 (для VS 2026 удобнее `build_windows.bat`). Для него нужна интеграция CUDA с VS, она ставится вместе с CUDA Toolkit. Скрипт `build_windows.bat` использует Ninja, ему эта интеграция не нужна.
 
 ## Что прислать после первой сборки
 
