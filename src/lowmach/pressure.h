@@ -44,14 +44,16 @@ private:
         Int3 dims;
         float dx = 1.f;
         Buffer<float> bx, by, bz;  // face coefficients (Dirichlet faces doubled, wall faces zero)
-        Buffer<float> x, b, r;     // x and b are unused on level 0 (the CG vectors are used instead)
+        Buffer<float> x, b, r;     // unallocated on level 0: the CG vectors are used instead
     };
+    // Residual buffer of a level; on level 0 it borrows ap_, which is idle during a V-cycle.
+    Buffer<float>& level_residual(std::size_t l) { return l == 0 ? ap_ : levels_[l].r; }
 
     Device dev_;
     Int3 dims_;
     float dx_;
     std::vector<Level> levels_;
-    Buffer<float> phi_, rhs_, r_, z_, p_, ap_;
+    Buffer<float> phi_, r_, z_, p_, ap_;  // the right-hand side is built directly in r_
 };
 
 }  // namespace sim

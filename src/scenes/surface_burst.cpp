@@ -17,6 +17,7 @@ class SurfaceBurstScene final : public Scene {
 public:
     SurfaceBurstScene(const SceneConfig& cfg, Device dev) : cfg_(cfg), dev_(dev), atmosphere_(cfg.atmosphere) {
         blast_ = std::make_unique<CompressibleSolver>(dev, cfg.grid, atmosphere_, cfg.blast, cfg.dust, cfg.humidity);
+        if (cfg.profile) blast_->profiler().enable(dev);
         blast_->reset_to_ambient();
         blast_->deposit_energy(cfg.seed);
         time_ = cfg.blast.start_time;
@@ -30,6 +31,7 @@ public:
     void advance_to(double t) override {
         if (t < time_ - 1e-9) throw std::runtime_error("surface_burst: frame time is before blast.start_time");
         steps_ = 0;
+        const Timer timer;
         if (blast_) {
             const double handoff = cfg_.blast.handoff_time;
             const double target = std::min(t, handoff);
@@ -43,31 +45,32 @@ public:
                 ++steps_;
                 last_dt_ = dt;
             }
+            device_synchronize(dev_);
+            step_ms_ = steps_ > 0 ? 1e3 * timer.seconds() / steps_ : 0.0;
             if (t >= handoff - 1e-12) handoff_to_rise();
         }
         if (rise_) rise_->advance_to(t);
     }
 
-    void fill_export(ExportBuffers& out) override {
-        if (blast_) {
-            blast_->fill_export(out.density.view(), out.dust.view(), out.condensate.view(), out.temperature.view(),
-                                out.flame.view(), out.vel_x.view(), out.vel_y.view(), out.vel_z.view(),
-                                cfg_.fireball.flame_temperature);
-        } else {
-            rise_->fill_export(out);
-        }
+    void export_field(ExportField f, float* host) override {
+        if (blast_) blast_->export_field_to_host(f, host, cfg_.fireball.flame_temperature);
+        else rise_->export_field(f, host);
     }
 
     std::string status() override {
         if (!blast_) return "[rise] " + rise_->status();
         char buf[256];
-        std::snprintf(buf, sizeof(buf), "[blast] steps=%d dt=%.2es | Tmax=%.0fK p/p0 max=%.2f shock r=%.0fm |u|max=%.0fm/s",
-                      steps_, last_dt_, double(blast_->max_temperature()), double(blast_->max_pressure_ratio()),
+        std::snprintf(buf, sizeof(buf),
+                      "[blast] steps=%d %.0fms/step dt=%.2es | Tmax=%.0fK p/p0 max=%.2f shock r=%.0fm |u|max=%.0fm/s",
+                      steps_, step_ms_, last_dt_, double(blast_->max_temperature()), double(blast_->max_pressure_ratio()),
                       double(blast_->shock_radius()), double(blast_->max_speed()));
         return buf;
     }
 
     std::size_t memory_bytes() const override { return blast_ ? blast_->memory_bytes() : rise_->memory_bytes(); }
+    std::string profile_report() override {
+        return blast_ ? blast_->profiler().report_and_reset() : rise_->profile_report();
+    }
 
 private:
     void handoff_to_rise() {
@@ -99,7 +102,7 @@ private:
     Atmosphere atmosphere_;
     std::unique_ptr<CompressibleSolver> blast_;
     std::unique_ptr<RisePhase> rise_;
-    double time_ = 0.0, last_dt_ = 0.0;
+    double time_ = 0.0, last_dt_ = 0.0, step_ms_ = 0.0;
     int steps_ = 0;
 };
 

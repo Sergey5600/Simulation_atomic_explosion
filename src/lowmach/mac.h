@@ -80,17 +80,15 @@ struct MacView {
     }
 };
 
-// Owning staggered velocity.
+// Owning staggered velocity. Every component is allocated with max_face_count so that
+// component buffers and advection scratch buffers can be swapped freely.
 struct MacField {
     Int3 dims;  // cell counts
     Buffer<float> u, v, w;
 
     MacField() = default;
-    MacField(Int3 n, Device dev)
-        : dims(n),
-          u(dev, std::size_t(u_dims(n).volume())),
-          v(dev, std::size_t(v_dims(n).volume())),
-          w(dev, std::size_t(w_dims(n).volume())) {}
+    MacField(Int3 n, Device dev) : dims(n), u(dev, max_face_count(n)), v(dev, max_face_count(n)), w(dev, max_face_count(n)) {}
+    std::size_t memory_bytes() const { return u.bytes() + v.bytes() + w.bytes(); }
 
     FieldView u_view() { return {u.data(), u_dims(dims)}; }
     FieldView v_view() { return {v.data(), v_dims(dims)}; }

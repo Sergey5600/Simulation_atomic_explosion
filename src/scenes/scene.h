@@ -4,27 +4,11 @@
 #include <memory>
 #include <string>
 
+#include "core/export_field.h"
 #include "core/grid.h"
 #include "io/config.h"
 
 namespace sim {
-
-// Cell-centred fields every scene fills for export, on the compute device.
-struct ExportBuffers {
-    ScalarField density, dust, condensate, temperature, flame, vel_x, vel_y, vel_z;
-
-    ExportBuffers(const GridInfo& g, Device dev)
-        : density("density", g, dev),
-          dust("dust", g, dev),
-          condensate("condensate", g, dev),
-          temperature("temperature", g, dev),
-          flame("flame", g, dev),
-          vel_x("vel_x", g, dev),
-          vel_y("vel_y", g, dev),
-          vel_z("vel_z", g, dev) {}
-
-    std::size_t memory_bytes() const { return 8 * density.buffer().bytes(); }
-};
 
 class Scene {
 public:
@@ -35,10 +19,14 @@ public:
 
     // Current grid; may change between frames when the domain grows (same cell counts).
     virtual GridInfo grid() const = 0;
-    virtual void fill_export(ExportBuffers& out) = 0;
+    // Computes one export field for the current state and copies it to `host`
+    // (grid().count() floats). Scenes use their own scratch memory for this.
+    virtual void export_field(ExportField f, float* host) = 0;
 
     // One line for the per-frame log (steps, solver iterations, extremes).
     virtual std::string status() { return {}; }
+    // Per-stage timing since the last call when profiling is on (SceneConfig::profile), else empty.
+    virtual std::string profile_report() { return {}; }
     virtual std::size_t memory_bytes() const { return 0; }
 };
 

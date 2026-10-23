@@ -22,7 +22,7 @@ public:
     RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm);
 
     void advance_to(double t);
-    void fill_export(ExportBuffers& out);
+    void export_field(ExportField f, float* host);
     std::string status();
 
     LowMachSolver& solver() { return solver_; }
@@ -30,6 +30,7 @@ public:
     double time() const { return time_; }
     void set_time(double t) { time_ = t; }
     std::size_t memory_bytes() const { return solver_.memory_bytes(); }
+    std::string profile_report() { return solver_.profiler().report_and_reset(); }
 
 private:
     void maybe_grow_domain();
@@ -40,6 +41,7 @@ private:
     int expansions_ = 0, steps_since_check_ = 0;
     int steps_ = 0, iterations_ = 0, projections_ = 0;
     double residual_ = 0.0, last_dt_ = 0.0;
+    double step_ms_ = 0.0;  // wall time per step during the last advance_to
 };
 
 std::unique_ptr<Scene> make_fireball_rise_scene(const SceneConfig& cfg, Device dev);

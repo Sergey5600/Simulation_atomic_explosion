@@ -53,7 +53,6 @@ using detail::stencil_of;
 PressureSolver::PressureSolver(Device dev, Int3 dims, float dx) : dev_(dev), dims_(dims), dx_(dx) {
     const std::size_t n = std::size_t(dims.volume());
     phi_.allocate(dev, n);
-    rhs_.allocate(dev, n);
     r_.allocate(dev, n);
     z_.allocate(dev, n);
     p_.allocate(dev, n);
@@ -68,8 +67,8 @@ PressureSolver::PressureSolver(Device dev, Int3 dims, float dx) : dev_(dev), dim
         lv.bx.allocate(dev, std::size_t(u_dims(d).volume()));
         lv.by.allocate(dev, std::size_t(v_dims(d).volume()));
         lv.bz.allocate(dev, std::size_t(w_dims(d).volume()));
-        lv.r.allocate(dev, std::size_t(d.volume()));
         if (!levels_.empty()) {
+            lv.r.allocate(dev, std::size_t(d.volume()));
             lv.x.allocate(dev, std::size_t(d.volume()));
             lv.b.allocate(dev, std::size_t(d.volume()));
         }
@@ -82,7 +81,7 @@ PressureSolver::PressureSolver(Device dev, Int3 dims, float dx) : dev_(dev), dim
 }
 
 std::size_t PressureSolver::memory_bytes() const {
-    std::size_t b = phi_.bytes() + rhs_.bytes() + r_.bytes() + z_.bytes() + p_.bytes() + ap_.bytes();
+    std::size_t b = phi_.bytes() + r_.bytes() + z_.bytes() + p_.bytes() + ap_.bytes();
     for (const Level& lv : levels_) b += lv.bx.bytes() + lv.by.bytes() + lv.bz.bytes() + lv.x.bytes() + lv.b.bytes() + lv.r.bytes();
     return b;
 }
@@ -181,7 +180,7 @@ void PressureSolver::vcycle(std::size_t l, FieldView x, FieldView b) {
         smooth(l, x, b, 0);
         smooth(l, x, b, 1);
     }
-    FieldView r{lv.r.data(), n};
+    FieldView r{level_residual(l).data(), n};
     residual(l, x, b, r);
 
     Level& cl = levels_[l + 1];
@@ -209,8 +208,8 @@ ProjectionStats PressureSolver::project(MacField& vel, FieldView source, float t
     const Int3 n = dims_;
     const float inv_dx = 1.f / dx_;
     FieldView u = vel.u_view(), v = vel.v_view(), w = vel.w_view();
-    FieldView phi{phi_.data(), n}, rhs{rhs_.data(), n}, r{r_.data(), n}, z{z_.data(), n}, p{p_.data(), n},
-        ap{ap_.data(), n};
+    FieldView phi{phi_.data(), n}, r{r_.data(), n}, z{z_.data(), n}, p{p_.data(), n}, ap{ap_.data(), n};
+    const FieldView rhs = r;  // built in r_, which the residual then overwrites in place
 
     // rhs = S - div(u*)  (A = -div(beta grad), so A phi = rhs gives div(u) = S)
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {

@@ -132,4 +132,69 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
     }
 }
 
+namespace {
+
+// Black -> purple -> orange -> yellow-white, t in [0, 1] (an inferno-like ramp).
+Rgb heat_ramp(float t) {
+    static const Rgb stops[] = {{0.f, 0.f, 0.f}, {0.30f, 0.05f, 0.45f}, {0.80f, 0.20f, 0.25f},
+                                {0.98f, 0.55f, 0.05f}, {1.f, 0.95f, 0.70f}};
+    const float x = std::clamp(t, 0.f, 1.f) * 4.f;
+    const int i = std::min(int(x), 3);
+    const float f = x - float(i);
+    const Rgb& a = stops[i];
+    const Rgb& b = stops[i + 1];
+    return {a.r + (b.r - a.r) * f, a.g + (b.g - a.g) * f, a.b + (b.b - a.b) * f};
+}
+
+}  // namespace
+
+void render_slice_png(const std::string& path, const SliceInput& in, int min_size) {
+    const GridInfo& g = in.grid;
+    const int w = g.dims.x, h = g.dims.z, gap = 2;
+    const int j = g.dims.y / 2;
+    const int W0 = 2 * w + gap;
+    std::vector<float> img(std::size_t(W0) * h * 3, 0.f);
+    const Rgb smoke{0.62f, 0.36f, 0.30f}, sand{0.78f, 0.66f, 0.50f}, water{0.96f, 0.97f, 0.98f};
+    for (int k = 0; k < h; ++k) {
+        for (int i = 0; i < w; ++i) {
+            const std::int64_t idx = g.index(i, j, k);
+            const float ds = in.density ? std::max(in.density[idx], 0.f) : 0.f;
+            const float dd = in.dust ? std::max(in.dust[idx], 0.f) : 0.f;
+            const float dc = in.condensate ? std::max(in.condensate[idx], 0.f) : 0.f;
+            const float d = ds + dd + dc;
+            const std::size_t row = std::size_t(h - 1 - k) * W0;
+            if (d > 0.f) {
+                const float b = (1.f - std::exp(-2.f * d)) / d;
+                float* px = &img[(row + i) * 3];
+                px[0] = b * (ds * smoke.r + dd * sand.r + dc * water.r);
+                px[1] = b * (ds * smoke.g + dd * sand.g + dc * water.g);
+                px[2] = b * (ds * smoke.b + dd * sand.b + dc * water.b);
+            }
+            if (in.vorticity) {
+                const float v = in.vorticity[idx];
+                const float t = v > 0.f ? (std::log10(v) + 2.f) / 4.f : 0.f;  // 0.01 .. 100 1/s
+                const Rgb c = heat_ramp(t);
+                float* px = &img[(row + w + gap + i) * 3];
+                px[0] = c.r;
+                px[1] = c.g;
+                px[2] = c.b;
+            }
+        }
+        for (int x = w; x < w + gap; ++x) {  // separator
+            float* px = &img[(std::size_t(h - 1 - k) * W0 + x) * 3];
+            px[0] = px[1] = px[2] = 0.35f;
+        }
+    }
+    const int scale = std::max(1, (min_size + std::max(W0, h) - 1) / std::max(W0, h));
+    const int W = W0 * scale, H = h * scale;
+    std::vector<std::uint8_t> out(std::size_t(W) * H * 3);
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x)
+            for (int c = 0; c < 3; ++c)
+                out[(std::size_t(y) * W + x) * 3 + c] = to_srgb8(img[(std::size_t(y / scale) * W0 + x / scale) * 3 + c]);
+    if (!stbi_write_png(path.c_str(), W, H, 3, out.data(), W * 3)) {
+        throw std::runtime_error("failed to write " + path);
+    }
+}
+
 }  // namespace sim

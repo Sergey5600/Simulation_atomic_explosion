@@ -63,6 +63,7 @@ void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const Dust
 
 RisePhase::RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm)
     : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust, cfg.humidity) {
+    if (cfg.profile) solver_.profiler().enable(dev);
     solver_.reset_to_ambient(cfg.wind);
     if (cfg.domain.expand && !LowMachSolver::can_coarsen(cfg.grid.dims)) {
         log_warn("domain.expand needs grid x, y divisible by 4 and z by 2: the domain will not grow");
@@ -75,6 +76,7 @@ void RisePhase::advance_to(double t) {
     iterations_ = 0;
     projections_ = 0;
     residual_ = 0.0;
+    const Timer timer;
     while (time_ < t - 1e-9) {
         double dt = solver_.suggest_dt();
         const double remaining = t - time_;
@@ -90,21 +92,21 @@ void RisePhase::advance_to(double t) {
         residual_ = std::max(residual_, s.max_residual);
         last_dt_ = dt;
     }
+    device_synchronize(solver_.device());
+    step_ms_ = steps_ > 0 ? 1e3 * timer.seconds() / steps_ : 0.0;
 }
 
-void RisePhase::fill_export(ExportBuffers& out) {
-    solver_.fill_export(out.density.view(), out.dust.view(), out.condensate.view(), out.temperature.view(),
-                        out.flame.view(), out.vel_x.view(), out.vel_y.view(), out.vel_z.view(),
-                        cfg_.fireball.flame_temperature);
+void RisePhase::export_field(ExportField f, float* host) {
+    solver_.export_field_to_host(f, host, cfg_.fireball.flame_temperature);
 }
 
 std::string RisePhase::status() {
     const CloudDiagnostics d = solver_.diagnostics();
     char buf[256];
     std::snprintf(buf, sizeof(buf),
-                  "steps=%d dt=%.3fs pcg=%.1f it/solve res=%.1e | Tmax=%.0fK top=%.0fm centroid=%.0fm "
+                  "steps=%d %.0fms/step dt=%.3fs pcg=%.1f it/solve res=%.1e | Tmax=%.0fK top=%.0fm centroid=%.0fm "
                   "|u|max=%.0fm/s at z=%.0fm dust=%.0ft cloud water=%.0ft",
-                  steps_, last_dt_, projections_ ? double(iterations_) / projections_ : 0.0, residual_,
+                  steps_, step_ms_, last_dt_, projections_ ? double(iterations_) / projections_ : 0.0, residual_,
                   double(solver_.max_temperature()), double(d.top), double(d.centroid_z), double(d.max_speed),
                   double(d.max_speed_z), d.dust_tonnes, solver_.condensate_tonnes());
     return buf;
@@ -144,8 +146,9 @@ public:
 
     GridInfo grid() const override { return rise_.grid(); }
     void advance_to(double t) override { rise_.advance_to(t); }
-    void fill_export(ExportBuffers& out) override { rise_.fill_export(out); }
+    void export_field(ExportField f, float* host) override { rise_.export_field(f, host); }
     std::string status() override { return rise_.status(); }
+    std::string profile_report() override { return rise_.profile_report(); }
     std::size_t memory_bytes() const override { return rise_.memory_bytes(); }
 
 private:

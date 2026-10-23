@@ -21,7 +21,9 @@
 #include <memory>
 #include <vector>
 
+#include "core/export_field.h"
 #include "core/grid.h"
+#include "core/profiler.h"
 #include "lowmach/advection.h"
 #include "lowmach/mac.h"
 #include "lowmach/pressure.h"
@@ -117,6 +119,10 @@ public:
     // (0 where ambient), flame = (T / flame_temperature)^4 above ambient.
     void fill_export(FieldView density, FieldView dust, FieldView condensate, FieldView temperature, FieldView flame,
                      FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature);
+    // One export field into dst (see ExportField), or into the solver's own scratch and then
+    // to the host, so exporting needs no extra device memory.
+    void export_field(ExportField f, FieldView dst, float flame_temperature);
+    void export_field_to_host(ExportField f, float* host, float flame_temperature);
 
     float max_temperature();
     float max_speed();
@@ -136,6 +142,7 @@ public:
     const AtmosphereColumns& ambient() const { return ambient_; }
     const DustParams& dust_params() const { return dust_; }
     std::size_t memory_bytes() const;
+    StageProfiler& profiler() { return profiler_; }
 
     // Step stages. Public only because nvcc does not allow device lambdas inside
     // private member functions.
@@ -179,13 +186,19 @@ private:
     AtmosphereColumns ambient_;
     Buffer<float> wind_u_, wind_v_;  // ambient wind per level, for the current grid
 
-    // Transported cell fields (theta, smoke, dust bins...), their next-step buffers and MacCormack scratch.
-    std::vector<Buffer<float>> scalars_, scalars_next_, scalars_bwd_;
+    // Transported cell fields (theta, smoke, dust bins...) and two shared cell temporaries.
+    // Memory is what limits the resolution, so the step reuses these and the advection
+    // scratch instead of keeping per-field copies:
+    //   tmp_a_, tmp_b_  MacCormack forward/result buffers, diffusion and settling output,
+    //                   vorticity components (with scratch_.c), the eddy viscosity
+    //   scratch_        traced positions, the confinement force (px, py, pz), face temporaries
+    std::vector<Buffer<float>> scalars_;
+    Buffer<float> tmp_a_, tmp_b_;
     Buffer<float> rho_, source_;
-    Buffer<float> omega_x_, omega_y_, omega_z_;
-    MacField vel_, vel_a_, vel_b_;
+    MacField vel_, vel_a_;
     AdvectionScratch scratch_;
     PressureSolver pressure_;
+    StageProfiler profiler_;
 };
 
 }  // namespace sim

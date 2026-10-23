@@ -14,7 +14,9 @@
 
 #include <vector>
 
+#include "core/export_field.h"
 #include "core/grid.h"
+#include "core/profiler.h"
 #include "lowmach/solver.h"
 #include "physics/atmosphere.h"
 #include "physics/humidity.h"
@@ -61,9 +63,11 @@ public:
     double suggest_dt();
     void step(double dt);
 
-    // Same fields as LowMachSolver::fill_export.
+    // Same fields as LowMachSolver::fill_export / export_field (the scratch is the second RK set).
     void fill_export(FieldView density, FieldView dust, FieldView condensate, FieldView temperature, FieldView flame,
                      FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature);
+    void export_field(ExportField f, FieldView dst, float flame_temperature);
+    void export_field_to_host(ExportField f, float* host, float flame_temperature);
 
     // State for the handoff to the low-Mach solver, on the host (cell centred).
     struct HandoffState {
@@ -81,12 +85,16 @@ public:
     const GridInfo& grid() const { return grid_; }
     Device device() const { return dev_; }
     std::size_t memory_bytes() const;
+    StageProfiler& profiler() { return profiler_; }
 
     // Raw arrays for tests and kernels (rho, mx, my, mz, E, rhoY...).
     FieldView var(int v) { return {u_[std::size_t(v)].data(), grid_.dims}; }
 
     // Stages. Public only because nvcc does not allow device lambdas inside private member functions.
-    void compute_rhs(int src_set);
+    // One Runge-Kutta stage without a right-hand-side array (memory limits the resolution):
+    // dst = alpha * u_ + beta * u1_ + c * L(src), where L is the flux divergence plus gravity
+    // and src/dst are 0 (u_) or 1 (u1_). The fluxes of one direction at a time go through flux_.
+    void rk_stage(int src_set, int dst_set, float alpha, float beta, float c);
     void apply_sources_after_step(float dt);
 
 private:
@@ -98,10 +106,11 @@ private:
     AtmosphereColumns ambient_;
     Buffer<float> ambient_qv_;  // ambient specific humidity per level (zeros without moisture)
     Buffer<float> rho0_c_, p0_c_, rho0_f_, p0_f_;  // hydrostatic background at cell centres / z-faces
+    StageProfiler profiler_;
 
 public:
-    // Conserved variables (two sets for the RK stages), right-hand side and one direction of fluxes.
-    std::vector<Buffer<float>> u_, u1_, rhs_, flux_;
+    // Conserved variables (two sets for the RK stages) and the fluxes of one direction.
+    std::vector<Buffer<float>> u_, u1_, flux_;
 };
 
 }  // namespace sim

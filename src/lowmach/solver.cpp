@@ -98,14 +98,12 @@ LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere&
       dust_(dust),
       atmosphere_(atm),
       ambient_(atm, grid, dev),
+      tmp_a_(dev, std::size_t(grid.count())),
+      tmp_b_(dev, std::size_t(grid.count())),
       rho_(dev, std::size_t(grid.count())),
       source_(dev, std::size_t(grid.count())),
-      omega_x_(dev, std::size_t(grid.count())),
-      omega_y_(dev, std::size_t(grid.count())),
-      omega_z_(dev, std::size_t(grid.count())),
       vel_(grid.dims, dev),
       vel_a_(grid.dims, dev),
-      vel_b_(grid.dims, dev),
       scratch_(grid.dims, dev),
       pressure_(dev, grid.dims, grid.dx) {
     humidity_ = humidity;
@@ -117,13 +115,7 @@ LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere&
         ambient_qv_.allocate(dev, q.size());
         ambient_qv_.upload(q.data(), q.size());
     }
-    for (int i = 0; i < count; ++i) {
-        scalars_.emplace_back(dev, std::size_t(grid.count()));
-        scalars_next_.emplace_back(dev, std::size_t(grid.count()));
-        scalars_bwd_.emplace_back(dev, std::size_t(grid.count()));
-    }
-    // add_forces borrows three of them for the confinement force.
-    while (scalars_bwd_.size() < 3) scalars_bwd_.emplace_back(dev, std::size_t(grid.count()));
+    for (int i = 0; i < count; ++i) scalars_.emplace_back(dev, std::size_t(grid.count()));
 }
 
 LowMachSolver::MoisturePointers LowMachSolver::moisture_pointers() {
@@ -144,8 +136,8 @@ LowMachSolver::DustPointers LowMachSolver::dust_pointers() {
 }
 
 std::size_t LowMachSolver::memory_bytes() const {
-    const std::size_t cells = (scalars_.size() + scalars_next_.size() + scalars_bwd_.size() + 5) * rho_.bytes();
-    const std::size_t faces = 3 * (vel_.u.bytes() + vel_.v.bytes() + vel_.w.bytes()) + 5 * scratch_.a.bytes();
+    const std::size_t cells = (scalars_.size() + 4) * rho_.bytes();
+    const std::size_t faces = vel_.memory_bytes() + vel_a_.memory_bytes() + scratch_.memory_bytes();
     return cells + faces + pressure_.memory_bytes();
 }
 
@@ -218,7 +210,7 @@ void LowMachSolver::coarsen_domain() {
     // Cell fields: average of the 8 old cells, ambient outside.
     for (std::size_t s = 0; s < scalars_.size(); ++s) {
         const FieldView src{scalars_[s].data(), n};
-        FieldView dst{scalars_next_[s].data(), n};
+        FieldView dst{tmp_a_.data(), n};
         const float* amb = s == std::size_t(kTheta)                                  ? new_ambient.theta.data()
                            : (humidity_.enabled && int(s) == vapor_index_) ? new_qv.data()
                                                                             : nullptr;
@@ -232,7 +224,7 @@ void LowMachSolver::coarsen_domain() {
                 dst(i, j, k) = amb ? amb[k] : 0.f;
             }
         });
-        std::swap(scalars_[s], scalars_next_[s]);
+        std::swap(scalars_[s], tmp_a_);
     }
 
     // Faces: average of the 4 old faces covering each new face, ambient wind outside.
@@ -293,8 +285,8 @@ void LowMachSolver::load_cell_state(const std::vector<float>& temperature, const
         throw std::invalid_argument("load_cell_state: arrays do not match the grid");
     }
     // Temperature -> potential temperature, on the device.
-    scalars_next_[kTheta].upload(temperature.data(), cells);
-    const FieldView tin{scalars_next_[kTheta].data(), n};
+    tmp_a_.upload(temperature.data(), cells);
+    const FieldView tin{tmp_a_.data(), n};
     FieldView th = theta();
     const float* exner = ambient_.exner.data();
     const float* t_amb = ambient_.temperature.data();
@@ -311,9 +303,9 @@ void LowMachSolver::load_cell_state(const std::vector<float>& temperature, const
     }
 
     // Cell velocities -> faces (mean of the two neighbours; outer faces take the boundary cell).
-    Buffer<float>& cu = scalars_next_[kTheta];
-    Buffer<float>& cv = scalars_bwd_[kTheta];
-    Buffer<float>& cw = scalars_next_[kSmoke];
+    Buffer<float>& cu = tmp_a_;
+    Buffer<float>& cv = tmp_b_;
+    Buffer<float>& cw = scratch_.a;
     cu.upload(u_in.data(), cells);
     cv.upload(v_in.data(), cells);
     cw.upload(w_in.data(), cells);
@@ -451,7 +443,8 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
     if (params_.vorticity_confinement <= 0.f) return;
     const float inv_2dx = 0.5f / grid_.dx;
     const detail::CellVelocity cv{u, v, w, n};
-    FieldView ox{omega_x_.data(), n}, oy{omega_y_.data(), n}, oz{omega_z_.data(), n};
+    // Temporaries are free here: vorticity in tmp_a_, tmp_b_, scratch_.c; force in scratch_.px/py/pz.
+    FieldView ox{tmp_a_.data(), n}, oy{tmp_b_.data(), n}, oz{scratch_.c.data(), n};
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const Float3 xp = cv.at(i + 1, j, k), xm = cv.at(i - 1, j, k);
         const Float3 yp = cv.at(i, j + 1, k), ym = cv.at(i, j - 1, k);
@@ -461,8 +454,8 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
         oz(i, j, k) = ((xp.y - xm.y) - (yp.x - ym.x)) * inv_2dx;
     });
     const detail::Confinement conf{ox, oy, oz, n, params_.vorticity_confinement * grid_.dx, inv_2dx, 1.f / grid_.dx};
-    // Force per cell once (the MacCormack scratch is free here), then averaged onto the faces.
-    FieldView fx{scalars_bwd_[0].data(), n}, fy{scalars_bwd_[1].data(), n}, fz{scalars_bwd_[2].data(), n};
+    // Force per cell once, then averaged onto the faces.
+    FieldView fx{scratch_.px.data(), n}, fy{scratch_.py.data(), n}, fz{scratch_.pz.data(), n};
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const Float3 f = conf.force(i, j, k);
         fx(i, j, k) = f.x;
@@ -485,15 +478,10 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
 }
 
 void LowMachSolver::advect_scalars(const MacView& vel, float dt) {
-    CellFieldSet set;
-    set.count = int(scalars_.size());
-    for (std::size_t i = 0; i < scalars_.size(); ++i) {
-        set.src[i] = scalars_[i].data();
-        set.dst[i] = scalars_next_[i].data();
-        set.bwd[i] = scalars_bwd_[i].data();
-    }
-    advect_cells_maccormack(dev_, vel, dt, grid_.dx, grid_.dims, set, scratch_);
-    for (std::size_t i = 0; i < scalars_.size(); ++i) std::swap(scalars_[i], scalars_next_[i]);
+    std::vector<Buffer<float>*> fields;
+    for (Buffer<float>& s : scalars_) fields.push_back(&s);
+    advect_cells_maccormack(dev_, vel, dt, grid_.dx, grid_.dims, fields.data(), int(fields.size()), tmp_a_, tmp_b_,
+                            scratch_);
 }
 
 namespace detail {
@@ -556,7 +544,7 @@ void LowMachSolver::apply_turbulence(MacField& field, float dt) {
     const float cs_dx2 = (params_.smagorinsky * dx) * (params_.smagorinsky * dx);
     const float nu_max = 0.9f * dx * dx / (6.f * dt);  // explicit stability limit
     const detail::CellVelocity cv{field.u_view(), field.v_view(), field.w_view(), n};
-    FieldView nu{omega_x_.data(), n};  // the vorticity scratch is free outside add_forces
+    FieldView nu{tmp_b_.data(), n};
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const Float3 dxp = cv.at(i + 1, j, k), dxm = cv.at(i - 1, j, k);
@@ -572,15 +560,19 @@ void LowMachSolver::apply_turbulence(MacField& field, float dt) {
 
     const float c_scalar = dt / (dx * dx * params_.turbulent_prandtl);
     for (std::size_t s = 0; s < scalars_.size(); ++s) {
-        detail::diffuse_cells(dev_, {scalars_[s].data(), n}, {scalars_next_[s].data(), n}, nu, c_scalar);
-        std::swap(scalars_[s], scalars_next_[s]);
+        detail::diffuse_cells(dev_, {scalars_[s].data(), n}, {tmp_a_.data(), n}, nu, c_scalar);
+        std::swap(scalars_[s], tmp_a_);
     }
 
+    // Faces through scratch_.b, swapped in component by component.
     const float c_mom = dt / (dx * dx);
-    detail::diffuse_faces(dev_, field.u_view(), vel_b_.u_view(), nu, n, 0, c_mom);
-    detail::diffuse_faces(dev_, field.v_view(), vel_b_.v_view(), nu, n, 1, c_mom);
-    detail::diffuse_faces(dev_, field.w_view(), vel_b_.w_view(), nu, n, 2, c_mom);
-    field.swap(vel_b_);
+    Buffer<float>& tmp = scratch_.b;
+    detail::diffuse_faces(dev_, field.u_view(), {tmp.data(), u_dims(n)}, nu, n, 0, c_mom);
+    std::swap(field.u, tmp);
+    detail::diffuse_faces(dev_, field.v_view(), {tmp.data(), v_dims(n)}, nu, n, 1, c_mom);
+    std::swap(field.v, tmp);
+    detail::diffuse_faces(dev_, field.w_view(), {tmp.data(), w_dims(n)}, nu, n, 2, c_mom);
+    std::swap(field.w, tmp);
 }
 
 // Settling (first-order upwind, falling dust leaves through the ground) and lifting of
@@ -597,7 +589,7 @@ void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
     const FieldView u = const_cast<MacField&>(field).u_view(), v = const_cast<MacField&>(field).v_view();
 
     for (int b = 0; b < kDustBins; ++b) {
-        FieldView src = dust(b), dst{scalars_next_[std::size_t(kDust0 + b)].data(), n};
+        FieldView src = dust(b), dst{tmp_a_.data(), n};
         const float c = dust_.settling[b] * dt / dx;  // Courant number of the fall
         const float split = dust_.erosion_split[b];
         parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
@@ -611,7 +603,7 @@ void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
             }
             dst(i, j, k) = fminf(y, 0.5f);
         });
-        std::swap(scalars_[std::size_t(kDust0 + b)], scalars_next_[std::size_t(kDust0 + b)]);
+        std::swap(scalars_[std::size_t(kDust0 + b)], tmp_a_);
     }
 }
 
@@ -631,41 +623,62 @@ StepStats LowMachSolver::step(double dt_d) {
         stats.max_residual = std::max(stats.max_residual, p.final_residual);
     };
 
+    StageProfiler& prof = profiler_;
+    prof.start();
     cool_and_build_source(dt);
     update_density();
+    prof.lap("cool");
 
     if (params_.reflection) {
         const float h = 0.5f * dt;
-        // Half step: advect, force, project.
+        // Half step: advect, force, project. vel_ is free once advected and keeps the
+        // unprojected copy for the reflection.
         advect_velocity(dev_, vel_.sampler(), h, grid_.dx, vel_, vel_a_, scratch_);
+        prof.lap("advect_u");
         add_forces(vel_a_, h);
+        prof.lap("forces");
         FieldView ua = vel_a_.u_view(), va = vel_a_.v_view(), wa = vel_a_.w_view();
-        FieldView ub = vel_b_.u_view(), vb = vel_b_.v_view(), wb = vel_b_.w_view();
+        FieldView ub = vel_.u_view(), vb = vel_.v_view(), wb = vel_.w_view();
         parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) { ub(i, j, k) = ua(i, j, k); });
         parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) { vb(i, j, k) = va(i, j, k); });
         parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) { wb(i, j, k) = wa(i, j, k); });
+        prof.lap("other");
         record(project(vel_a_));
+        prof.lap("project");
         // Reflect the pressure correction: u_hat = 2 u_proj - u_unproj.
         parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) { ub(i, j, k) = 2.f * ua(i, j, k) - ub(i, j, k); });
         parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) { vb(i, j, k) = 2.f * va(i, j, k) - vb(i, j, k); });
         parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) { wb(i, j, k) = 2.f * wa(i, j, k) - wb(i, j, k); });
+        prof.lap("other");
         // Second half: advect the reflected field with the projected midpoint velocity.
         const MacView mid = vel_a_.sampler();
-        advect_velocity(dev_, mid, h, grid_.dx, vel_b_, vel_, scratch_);
+        advect_velocity_in_place(dev_, mid, h, grid_.dx, vel_, scratch_);
+        prof.lap("advect_u");
         advect_scalars(mid, dt);
+        prof.lap("advect_scalars");
         apply_turbulence(vel_, dt);
+        prof.lap("turbulence");
         settle_and_lift_dust(vel_, dt);
         update_density();
+        prof.lap("dust");
         add_forces(vel_, h);
+        prof.lap("forces");
         record(project(vel_));
+        prof.lap("project");
     } else {
         advect_scalars(vel_.sampler(), dt);
+        prof.lap("advect_scalars");
         advect_velocity(dev_, vel_.sampler(), dt, grid_.dx, vel_, vel_a_, scratch_);
+        prof.lap("advect_u");
         apply_turbulence(vel_a_, dt);
+        prof.lap("turbulence");
         settle_and_lift_dust(vel_a_, dt);
         update_density();
+        prof.lap("dust");
         add_forces(vel_a_, dt);
+        prof.lap("forces");
         record(project(vel_a_));
+        prof.lap("project");
         vel_.swap(vel_a_);
     }
     return stats;
@@ -748,6 +761,22 @@ double LowMachSolver::suggest_dt() {
 void LowMachSolver::fill_export(FieldView density, FieldView dust_out, FieldView cond_out, FieldView temperature,
                                 FieldView flame, FieldView vel_x, FieldView vel_y, FieldView vel_z,
                                 float flame_temperature) {
+    export_field(ExportField::Density, density, flame_temperature);
+    export_field(ExportField::Dust, dust_out, flame_temperature);
+    export_field(ExportField::Condensate, cond_out, flame_temperature);
+    export_field(ExportField::Temperature, temperature, flame_temperature);
+    export_field(ExportField::Flame, flame, flame_temperature);
+    export_field(ExportField::VelX, vel_x, flame_temperature);
+    export_field(ExportField::VelY, vel_y, flame_temperature);
+    export_field(ExportField::VelZ, vel_z, flame_temperature);
+}
+
+void LowMachSolver::export_field_to_host(ExportField f, float* host, float flame_temperature) {
+    export_field(f, FieldView{tmp_a_.data(), grid_.dims}, flame_temperature);
+    tmp_a_.download(host, std::size_t(grid_.count()));
+}
+
+void LowMachSolver::export_field(ExportField field, FieldView out, float flame_temperature) {
     const Int3 n = grid_.dims;
     FieldView th = theta(), sm = smoke();
     const float* exner = ambient_.exner.data();
@@ -756,6 +785,7 @@ void LowMachSolver::fill_export(FieldView density, FieldView dust_out, FieldView
     const float rho_ground = ambient_.ground_density;
     const float r_gas = phys::kGasConstantAir;
     const float inv_tf = 1.f / flame_temperature;
+    const float inv_2dx = 0.5f / grid_.dx;
     const detail::CellVelocity cv{vel_.u_view(), vel_.v_view(), vel_.w_view(), n};
     const DustPointers dp = dust_pointers();
     float wgt[kDustBins];
@@ -767,6 +797,7 @@ void LowMachSolver::fill_export(FieldView density, FieldView dust_out, FieldView
     const bool has_dust = dp.count > 0;
     const MoisturePointers mp = moisture_pointers();
     const float cond_scale = humidity_.render_scale;
+    const int which = int(field);
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
@@ -778,16 +809,33 @@ void LowMachSolver::fill_export(FieldView density, FieldView dust_out, FieldView
         const float cloud = mp.qc ? cond_scale * mp.qc[idx] * rho / rho_ground : 0.f;
         const bool hot = t > ta + 1.f;
         const bool active = hot || s > 1e-4f || optical_dust > 1e-4f || cloud > 1e-4f;
-        density(i, j, k) = s * rho / rho_ground;
-        dust_out(i, j, k) = optical_dust;
-        cond_out(i, j, k) = cloud;
-        temperature(i, j, k) = active ? t : 0.f;
-        const float x = t * inv_tf, xa = ta * inv_tf;
-        flame(i, j, k) = hot ? fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f) : 0.f;
-        const Float3 vc = cv.at(i, j, k);
-        vel_x(i, j, k) = active ? vc.x : 0.f;
-        vel_y(i, j, k) = active ? vc.y : 0.f;
-        vel_z(i, j, k) = active ? vc.z : 0.f;
+        float v = 0.f;
+        switch (ExportField(which)) {
+            case ExportField::Density: v = s * rho / rho_ground; break;
+            case ExportField::Dust: v = optical_dust; break;
+            case ExportField::Condensate: v = cloud; break;
+            case ExportField::Temperature: v = active ? t : 0.f; break;
+            case ExportField::Flame: {
+                const float x = t * inv_tf, xa = ta * inv_tf;
+                v = hot ? fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f) : 0.f;
+                break;
+            }
+            case ExportField::VelX: v = active ? cv.at(i, j, k).x : 0.f; break;
+            case ExportField::VelY: v = active ? cv.at(i, j, k).y : 0.f; break;
+            case ExportField::VelZ: v = active ? cv.at(i, j, k).z : 0.f; break;
+            case ExportField::Vorticity:
+                if (active) {
+                    const Float3 xp = cv.at(i + 1, j, k), xm = cv.at(i - 1, j, k);
+                    const Float3 yp = cv.at(i, j + 1, k), ym = cv.at(i, j - 1, k);
+                    const Float3 zp = cv.at(i, j, k + 1), zm = cv.at(i, j, k - 1);
+                    const Float3 om{((yp.z - ym.z) - (zp.y - zm.y)) * inv_2dx, ((zp.x - zm.x) - (xp.z - xm.z)) * inv_2dx,
+                                    ((xp.y - xm.y) - (yp.x - ym.x)) * inv_2dx};
+                    v = length(om);
+                }
+                break;
+            default: break;
+        }
+        out(i, j, k) = v;
     });
 }
 

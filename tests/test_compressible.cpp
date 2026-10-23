@@ -136,13 +136,13 @@ TEST_CASE("surface burst scene hands off to the buoyant phase") {
     cfg.blast.handoff_time = 0.3f;
     cfg.wind.points = {{0.f, 2.f}, {1000.f, 4.f}};
     auto scene = make_scene(cfg, parse_device(cfg.device));
-    ExportBuffers out(cfg.grid, parse_device(cfg.device));
+    const std::size_t cells = std::size_t(cfg.grid.count());
 
     scene->advance_to(0.1);
-    scene->fill_export(out);
     CHECK(scene->status().rfind("[blast]", 0) == 0);
     {
-        const std::vector<float> f = out.flame.buffer().to_host();
+        std::vector<float> f(cells);
+        scene->export_field(ExportField::Flame, f.data());
         float fmax = 0.f;
         bool finite = true;
         for (float v : f) {
@@ -154,9 +154,9 @@ TEST_CASE("surface burst scene hands off to the buoyant phase") {
     }
 
     scene->advance_to(0.6);
-    scene->fill_export(out);
     CHECK(scene->status().rfind("[rise]", 0) == 0);
-    const std::vector<float> t = out.temperature.buffer().to_host();
+    std::vector<float> t(cells);
+    scene->export_field(ExportField::Temperature, t.data());
     float tmax = 0.f;
     bool finite = true;
     for (float v : t) {

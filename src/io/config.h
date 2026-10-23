@@ -23,6 +23,7 @@ struct OutputConfig {
     float prune_tolerance = 1e-4f;    // values with |v| <= tolerance become background
     std::vector<std::string> fields;  // exported grids
     int preview_every = 0;            // write a PNG preview every N frames (0 = off)
+    int slices_every = 0;             // write density/vorticity slice PNGs every N frames (0 = off)
     ExportSchedule schedule;
 };
 
@@ -91,6 +92,7 @@ struct SceneConfig {
     DomainConfig domain;
     BlastParams blast;
     HumidityProfile humidity;
+    bool profile = false;  // per-stage step timing in the log (set from the command line)
 };
 
 SceneConfig load_scene(const std::string& path);

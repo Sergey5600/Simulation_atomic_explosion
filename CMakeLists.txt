@@ -79,6 +79,7 @@ set(SIM_HOST_SOURCES
   src/core/schedule.cpp
   src/io/config.cpp
   src/io/vdb_writer.cpp
+  src/io/vdb_compare.cpp
   src/io/manifest.cpp
   src/preview/preview.cpp
   src/physics/atmosphere.cpp

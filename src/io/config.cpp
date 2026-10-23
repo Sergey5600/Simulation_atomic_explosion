@@ -93,6 +93,7 @@ void parse_output(const toml::table& t, OutputConfig& o) {
     o.half_float = get_or<bool>(t, "half_float", o.half_float);
     o.prune_tolerance = float(get_or<double>(t, "prune_tolerance", o.prune_tolerance));
     o.preview_every = int(get_or<std::int64_t>(t, "preview_every", o.preview_every));
+    o.slices_every = int(get_or<std::int64_t>(t, "slices_every", o.slices_every));
     if (const auto* arr = t.get_as<toml::array>("fields")) {
         for (const auto& el : *arr) {
             if (auto v = el.value<std::string>()) o.fields.push_back(*v);

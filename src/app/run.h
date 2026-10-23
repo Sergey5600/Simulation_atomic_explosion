@@ -10,6 +10,8 @@ struct RunOptions {
     std::string output_dir;     // overrides [output].dir when non-empty
     int max_frames = -1;        // export at most this many frames (-1 = all)
     int preview_every = -1;     // overrides [output].preview_every when >= 0
+    int slices_every = -1;      // overrides [output].slices_every when >= 0
+    bool profile = false;       // per-stage step timing in the log
 };
 
 // Runs a scene end to end; returns a process exit code.

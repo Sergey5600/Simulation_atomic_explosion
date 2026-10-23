@@ -216,7 +216,6 @@ CompressibleSolver::CompressibleSolver(Device dev, const GridInfo& grid, const A
     for (int v = 0; v < kVars; ++v) {
         u_.emplace_back(dev, cells);
         u1_.emplace_back(dev, cells);
-        rhs_.emplace_back(dev, cells);
         flux_.emplace_back(dev, faces);
     }
     // Hydrostatic background (zeros when the scheme is not well-balanced).
@@ -245,7 +244,7 @@ CompressibleSolver::CompressibleSolver(Device dev, const GridInfo& grid, const A
 }
 
 std::size_t CompressibleSolver::memory_bytes() const {
-    return std::size_t(kVars) * (u_[0].bytes() + u1_[0].bytes() + rhs_[0].bytes() + flux_[0].bytes());
+    return std::size_t(kVars) * (u_[0].bytes() + u1_[0].bytes() + flux_[0].bytes());
 }
 
 void CompressibleSolver::reset_to_ambient() {
@@ -307,7 +306,7 @@ void CompressibleSolver::deposit_energy(std::uint32_t seed) {
     });
 }
 
-void CompressibleSolver::compute_rhs(int src_set) {
+void CompressibleSolver::rk_stage(int src_set, int dst_set, float alpha, float beta, float c) {
     const Int3 n = grid_.dims;
     std::vector<Buffer<float>>& src = src_set == 0 ? u_ : u1_;
     detail::EulerView ev;
@@ -316,23 +315,27 @@ void CompressibleSolver::compute_rhs(int src_set) {
     ev.gamma = params_.gamma;
     ev.rho0c = rho0_c_.data();
     ev.p0c = p0_c_.data();
-    detail::ConsPointers flux, rhs;
+    detail::ConsPointers flux, dst, u0, u1;
     for (int v = 0; v < kVars; ++v) {
         flux.c[v] = flux_[std::size_t(v)].data();
-        rhs.c[v] = rhs_[std::size_t(v)].data();
+        dst.c[v] = (dst_set == 0 ? u_ : u1_)[std::size_t(v)].data();
+        u0.c[v] = u_[std::size_t(v)].data();
+        u1.c[v] = u1_[std::size_t(v)].data();
     }
-    const float inv_dx = 1.f / grid_.dx;
+    const float c_dx = c / grid_.dx;
     for (int d = 0; d < 3; ++d) {
+        // The flux kernel reads only src; dst may be src's partner set but never src itself
+        // while fluxes are still being computed from it.
         detail::compute_fluxes(dev_, ev, flux, rho0_f_.data(), p0_f_.data(), d);
         const Int3 fd{n.x + (d == 0), n.y + (d == 1), n.z + (d == 2)};
         const bool first = d == 0;
         parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-            const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+            const std::int64_t cc = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
             const std::int64_t lo = i + std::int64_t(fd.x) * (j + std::int64_t(fd.y) * k);
             const std::int64_t hi = (i + (d == 0)) + std::int64_t(fd.x) * ((j + (d == 1)) + std::int64_t(fd.y) * (k + (d == 2)));
             for (int v = 0; v < detail::kEV; ++v) {
-                const float div = (flux.c[v][hi] - flux.c[v][lo]) * inv_dx;
-                rhs.c[v][c] = first ? -div : rhs.c[v][c] - div;
+                const float base = first ? alpha * u0.c[v][cc] + beta * u1.c[v][cc] : dst.c[v][cc];
+                dst.c[v][cc] = base - (flux.c[v][hi] - flux.c[v][lo]) * c_dx;
             }
         });
     }
@@ -342,10 +345,10 @@ void CompressibleSolver::compute_rhs(int src_set) {
     const bool balanced = params_.well_balanced;
     const detail::ConsPointers cur = ev.u;
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-        const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
-        const float rho = cur.c[0][c];
-        rhs.c[3][c] -= (rho - (balanced ? rho0c[k] : 0.f)) * g;
-        rhs.c[4][c] -= cur.c[3][c] * g;
+        const std::int64_t cc = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        const float rho = cur.c[0][cc];
+        dst.c[3][cc] -= c * (rho - (balanced ? rho0c[k] : 0.f)) * g;
+        dst.c[4][cc] -= c * cur.c[3][cc] * g;
     });
 }
 
@@ -369,26 +372,21 @@ void apply_floors(Device dev, ConsPointers u, Int3 n, float gamma) {
 void CompressibleSolver::step(double dt_d) {
     const float dt = float(dt_d);
     const Int3 n = grid_.dims;
-    detail::ConsPointers u, u1, rhs;
+    detail::ConsPointers u, u1;
     for (int v = 0; v < kVars; ++v) {
         u.c[v] = u_[std::size_t(v)].data();
         u1.c[v] = u1_[std::size_t(v)].data();
-        rhs.c[v] = rhs_[std::size_t(v)].data();
     }
-    // SSP-RK2 (Heun).
-    compute_rhs(0);
-    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-        const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
-        for (int v = 0; v < detail::kEV; ++v) u1.c[v][c] = u.c[v][c] + dt * rhs.c[v][c];
-    });
+    // SSP-RK2 (Heun): u1 = u + dt L(u), then u = (u + u1 + dt L(u1)) / 2.
+    profiler_.start();
+    rk_stage(0, 1, 1.f, 0.f, dt);
     detail::apply_floors(dev_, u1, n, params_.gamma);
-    compute_rhs(1);
-    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-        const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
-        for (int v = 0; v < detail::kEV; ++v) u.c[v][c] = 0.5f * (u.c[v][c] + u1.c[v][c] + dt * rhs.c[v][c]);
-    });
+    profiler_.lap("rk1");
+    rk_stage(1, 0, 0.5f, 0.5f, 0.5f * dt);
     detail::apply_floors(dev_, u, n, params_.gamma);
+    profiler_.lap("rk2");
     apply_sources_after_step(dt);
+    profiler_.lap("sources");
 }
 
 void CompressibleSolver::apply_sources_after_step(float dt) {
@@ -481,21 +479,53 @@ SIM_INLINE CellState cell_state(FieldView r, FieldView mx, FieldView my, FieldVi
     return s;
 }
 
+// Cell velocity from momentum and density, indices clamped to the grid (for central differences).
+struct MomentumVelocity {
+    FieldView r, mx, my, mz;
+    Int3 n;
+    SIM_INLINE Float3 at(int i, int j, int k) const {
+        i = i < 0 ? 0 : (i >= n.x ? n.x - 1 : i);
+        j = j < 0 ? 0 : (j >= n.y ? n.y - 1 : j);
+        k = k < 0 ? 0 : (k >= n.z ? n.z - 1 : k);
+        const float inv = 1.f / r(i, j, k);
+        return make_f3(mx(i, j, k) * inv, my(i, j, k) * inv, mz(i, j, k) * inv);
+    }
+};
+
 }  // namespace detail
 
 void CompressibleSolver::fill_export(FieldView density, FieldView dust_out, FieldView cond_out, FieldView temperature,
                                      FieldView flame, FieldView vel_x, FieldView vel_y, FieldView vel_z,
                                      float flame_temperature) {
+    export_field(ExportField::Density, density, flame_temperature);
+    export_field(ExportField::Dust, dust_out, flame_temperature);
+    export_field(ExportField::Condensate, cond_out, flame_temperature);
+    export_field(ExportField::Temperature, temperature, flame_temperature);
+    export_field(ExportField::Flame, flame, flame_temperature);
+    export_field(ExportField::VelX, vel_x, flame_temperature);
+    export_field(ExportField::VelY, vel_y, flame_temperature);
+    export_field(ExportField::VelZ, vel_z, flame_temperature);
+}
+
+void CompressibleSolver::export_field_to_host(ExportField f, float* host, float flame_temperature) {
+    export_field(f, FieldView{u1_[0].data(), grid_.dims}, flame_temperature);
+    u1_[0].download(host, std::size_t(grid_.count()));
+}
+
+void CompressibleSolver::export_field(ExportField field, FieldView out, float flame_temperature) {
     FieldView r = var(0), mx = var(1), my = var(2), mz = var(3), e = var(4), smoke = var(5);
     FieldView d0 = var(6), d1 = var(7), d2 = var(8), qc = var(kVapor + 1);
+    const Int3 n = grid_.dims;
     const float gamma = params_.gamma;
     const float* t_amb = ambient_.temperature.data();
     const float rho_ground = ambient_.ground_density;
     const float cond_scale = humidity_.enabled ? humidity_.render_scale : 0.f;
     const float inv_tf = 1.f / flame_temperature;
+    const float inv_2dx = 0.5f / grid_.dx;
     const float w0 = dust_.optical_weight[0] * dust_.render_scale, w1 = dust_.optical_weight[1] * dust_.render_scale,
                 w2 = dust_.optical_weight[2] * dust_.render_scale;
-    parallel_for(dev_, grid_.dims, SIM_LAMBDA(int i, int j, int k) {
+    const int which = int(field);
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const detail::CellState s = detail::cell_state(r, mx, my, mz, e, gamma, i, j, k);
         const float ta = t_amb[k];
         // Half-float storage tops out at 65504.
@@ -505,26 +535,45 @@ void CompressibleSolver::fill_export(FieldView density, FieldView dust_out, Fiel
         const float cloud = cond_scale * qc(i, j, k) / rho_ground;
         const bool hot = t > ta + 1.f;
         const bool active = hot || sm > 1e-4f * s.rho || optical_dust > 1e-4f || cloud > 1e-4f;
-        density(i, j, k) = sm / rho_ground;
-        dust_out(i, j, k) = optical_dust;
-        cond_out(i, j, k) = cloud;
-        temperature(i, j, k) = active ? t : 0.f;
-        const float x = t * inv_tf, xa = ta * inv_tf;
-        flame(i, j, k) = hot ? fminf(fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f), 60000.f) : 0.f;
-        vel_x(i, j, k) = active ? s.vx : 0.f;
-        vel_y(i, j, k) = active ? s.vy : 0.f;
-        vel_z(i, j, k) = active ? s.vz : 0.f;
+        float v = 0.f;
+        switch (ExportField(which)) {
+            case ExportField::Density: v = sm / rho_ground; break;
+            case ExportField::Dust: v = optical_dust; break;
+            case ExportField::Condensate: v = cloud; break;
+            case ExportField::Temperature: v = active ? t : 0.f; break;
+            case ExportField::Flame: {
+                const float x = t * inv_tf, xa = ta * inv_tf;
+                v = hot ? fminf(fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f), 60000.f) : 0.f;
+                break;
+            }
+            case ExportField::VelX: v = active ? s.vx : 0.f; break;
+            case ExportField::VelY: v = active ? s.vy : 0.f; break;
+            case ExportField::VelZ: v = active ? s.vz : 0.f; break;
+            case ExportField::Vorticity:
+                if (active) {
+                    const detail::MomentumVelocity vel{r, mx, my, mz, n};
+                    const Float3 xp = vel.at(i + 1, j, k), xm = vel.at(i - 1, j, k);
+                    const Float3 yp = vel.at(i, j + 1, k), ym = vel.at(i, j - 1, k);
+                    const Float3 zp = vel.at(i, j, k + 1), zm = vel.at(i, j, k - 1);
+                    const Float3 om{((yp.z - ym.z) - (zp.y - zm.y)) * inv_2dx, ((zp.x - zm.x) - (xp.z - xm.z)) * inv_2dx,
+                                    ((xp.y - xm.y) - (yp.x - ym.x)) * inv_2dx};
+                    v = length(om);
+                }
+                break;
+            default: break;
+        }
+        out(i, j, k) = v;
     });
 }
 
 CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
-    // Use the rhs arrays as scratch: temperature, smoke, u, v, w, dust bins.
+    // Use the second RK set (free between steps) as scratch: temperature, smoke, u, v, w, dust bins.
     FieldView r = var(0), mx = var(1), my = var(2), mz = var(3), e = var(4), smoke = var(5);
     FieldView d0 = var(6), d1 = var(7), d2 = var(8);
     const Int3 n = grid_.dims;
-    FieldView ot{rhs_[0].data(), n}, os{rhs_[1].data(), n}, ou{rhs_[2].data(), n}, ov{rhs_[3].data(), n},
-        ow{rhs_[4].data(), n}, o0{rhs_[5].data(), n}, o1{rhs_[6].data(), n}, o2{rhs_[7].data(), n},
-        oqv{rhs_[8].data(), n}, oqc{rhs_[9].data(), n};
+    FieldView ot{u1_[0].data(), n}, os{u1_[1].data(), n}, ou{u1_[2].data(), n}, ov{u1_[3].data(), n},
+        ow{u1_[4].data(), n}, o0{u1_[5].data(), n}, o1{u1_[6].data(), n}, o2{u1_[7].data(), n},
+        oqv{u1_[8].data(), n}, oqc{u1_[9].data(), n};
     FieldView qv = var(kVapor), qc = var(kVapor + 1);
     const float gamma = params_.gamma;
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
@@ -541,14 +590,14 @@ CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
         oqc(i, j, k) = qc(i, j, k) / s.rho;
     });
     HandoffState h;
-    h.temperature = rhs_[0].to_host();
-    h.smoke = rhs_[1].to_host();
-    h.u = rhs_[2].to_host();
-    h.v = rhs_[3].to_host();
-    h.w = rhs_[4].to_host();
-    for (int b = 0; b < kDustBins; ++b) h.dust[b] = rhs_[std::size_t(5 + b)].to_host();
-    h.vapor = rhs_[8].to_host();
-    h.condensate = rhs_[9].to_host();
+    h.temperature = u1_[0].to_host();
+    h.smoke = u1_[1].to_host();
+    h.u = u1_[2].to_host();
+    h.v = u1_[3].to_host();
+    h.w = u1_[4].to_host();
+    for (int b = 0; b < kDustBins; ++b) h.dust[b] = u1_[std::size_t(5 + b)].to_host();
+    h.vapor = u1_[8].to_host();
+    h.condensate = u1_[9].to_host();
     return h;
 }
 
