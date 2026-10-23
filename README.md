@@ -9,44 +9,43 @@
 ## Сборка на Windows
 
 Нужно:
-- Visual Studio 2022 с компонентом «Desktop development with C++»;
-- CUDA Toolkit 13.x (ставить после Visual Studio, чтобы установилась интеграция с VS);
-- CMake 3.25+ (входит в Visual Studio);
+- Visual Studio 2022 с компонентом «Desktop development with C++» (в него входят CMake и Ninja);
+- CUDA Toolkit 13.x;
 - Git;
-- vcpkg.
+- Blender 5.2.
 
-### 1. vcpkg (один раз)
+vcpkg ставить вручную не надо, скрипт сделает это сам.
 
-```bat
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
-C:\vcpkg\bootstrap-vcpkg.bat
-setx VCPKG_ROOT C:\vcpkg
+Все команды ниже для **PowerShell**, выполнять в папке репозитория (там, где лежит `build_windows.bat`).
+
+### 1. Сборка
+
+```powershell
+.\build_windows.bat
 ```
 
-После `setx` перезапусти терминал.
+Скрипт:
+1. находит Visual Studio и включает её окружение (cmake, ninja, компилятор);
+2. находит CUDA (без неё соберёт версию только для CPU);
+3. ставит vcpkg в `C:\vcpkg`, если его ещё нет;
+4. собирает проект, запускает тесты и печатает информацию о видеокарте.
 
-### 2. Конфигурация и сборка
+Первый запуск **долгий, 30–60 минут**: vcpkg собирает OpenVDB и его зависимости. Следующие сборки идут за минуту-две.
 
-Команды выполняются в корне репозитория (`cmd` или PowerShell):
+Весь вывод дублируется в `build\build_windows.log`. Если что-то упало, пришли этот файл.
 
-```bat
-cmake --preset windows
-cmake --build --preset windows
-ctest --preset windows
+Опции:
+- `.\build_windows.bat -Cpu` — без CUDA;
+- `-SkipTests` — без тестов;
+- `-VcpkgRoot D:\path\to\vcpkg` — свой vcpkg.
+
+### 2. Запуск тестовой сцены
+
+```powershell
+.\build\windows-ninja\nukesim.exe scenes\test_fireball.toml
 ```
 
-Первый `cmake --preset windows` сам скачает и соберёт зависимости через vcpkg (OpenVDB, TBB, Blosc, Boost и т.д.). Это **долго, 30–60 минут**, но только один раз.
-
-Если CMake пишет, что не находит CUDA toolset для Visual Studio, переустанови CUDA Toolkit с галочкой «Visual Studio Integration». Временно можно собрать без GPU: `cmake --preset windows-cpu`.
-
-### 3. Запуск
-
-```bat
-build\windows\Release\nukesim.exe --info
-build\windows\Release\nukesim.exe scenes\test_fireball.toml
-```
-
-`--info` должен показать твою RTX 3060. Тестовая сцена пишет 120 кадров в `out\test_fireball\`: файлы `.vdb`, `manifest.json` и превью в `preview\`.
+Сцена пишет 120 кадров в `out\test_fireball\`: файлы `.vdb`, `manifest.json` и PNG-превью в `preview\`.
 
 Опции:
 
@@ -55,30 +54,34 @@ build\windows\Release\nukesim.exe scenes\test_fireball.toml
 | `--device cpu\|cuda\|auto` | на чём считать |
 | `--out DIR` | папка вывода |
 | `--frames N` | только первые N кадров |
-| `--preview-every N` | PNG-превью каждые N кадров (0 = выкл.) |
+| `--preview-every N` | превью каждые N кадров (0 = выкл.) |
+| `--info` | показать устройства |
 
-### 4. Blender (5.2)
+### 3. Открыть в Blender
 
-```bat
-"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" --python tools\blender\import_explosion.py -- --dir out\test_fireball --preview-scene
+```powershell
+.\open_in_blender.bat
 ```
 
-Скрипт:
-- импортирует последовательность VDB как Volume-объект;
+Скрипт сам ищет Blender в `Program Files` и Steam. Если не нашёл, укажи путь: `.\open_in_blender.bat -Blender "D:\Blender\blender.exe"`. Другая папка с результатом задаётся через `-Dir out\имя`.
+
+Импорт (`tools\blender\import_explosion.py`):
+- загружает последовательность VDB как Volume-объект;
 - собирает материал: плотность, излучение абсолютно чёрного тела по `temperature`, яркость по `flame`;
 - включает motion blur по сетке `velocity`;
-- добавляет точечный свет, который следует за шаром (позиция и яркость из `manifest.json`).
+- добавляет точечный свет, который следует за шаром.
 
-`--preview-scene` дополнительно ставит камеру, солнце, небо и плоскость земли. Без него импортируется только сам взрыв, в твою существующую сцену.
+По умолчанию добавляется и превью-сцена: камера, солнце, небо, земля. Флаг `-NoPreviewScene` импортирует только сам взрыв, в твою сцену.
 
-Остальные опции (`--density`, `--emission`, `--light-power`, …) описаны в начале скрипта.
+### Сборка из Visual Studio (по желанию)
+
+Preset `windows` использует генератор Visual Studio. Для него нужна интеграция CUDA с VS, она ставится вместе с CUDA Toolkit. Скрипт `build_windows.bat` использует Ninja, ему эта интеграция не нужна.
 
 ## Что прислать после первой сборки
 
-1. Вывод `nukesim.exe --info`.
-2. Результат `ctest --preset windows`: строки с `test cases` и `assertions`.
-3. Последние строки лога тестовой сцены, где видны время и размер файлов.
-4. Скриншот из Blender. Если что-то упало, пришли текст ошибки целиком.
+1. Файл `build\build_windows.log`, а если всё прошло, хватит последних строк: тесты и `--info`.
+2. Последние строки лога тестовой сцены, где видны время и размер файлов.
+3. Скриншот из Blender.
 
 ## Сборка на Linux
 

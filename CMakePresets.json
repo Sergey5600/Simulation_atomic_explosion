@@ -1,12 +1,19 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "windows",
       "displayName": "Windows: Visual Studio 2022 + CUDA",
       "generator": "Visual Studio 17 2022",
-      "architecture": { "value": "x64", "strategy": "set" },
+      "architecture": {
+        "value": "x64",
+        "strategy": "set"
+      },
       "binaryDir": "${sourceDir}/build/windows",
       "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
@@ -14,41 +21,147 @@
         "SIM_ENABLE_CUDA": "ON",
         "CMAKE_CUDA_ARCHITECTURES": "86"
       },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     },
     {
       "name": "windows-cpu",
       "inherits": "windows",
       "displayName": "Windows: Visual Studio 2022, CPU only",
       "binaryDir": "${sourceDir}/build/windows-cpu",
-      "cacheVariables": { "SIM_ENABLE_CUDA": "OFF" }
+      "cacheVariables": {
+        "SIM_ENABLE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "windows-ninja",
+      "displayName": "Windows: Ninja + CUDA (needs a VS developer shell; used by build_windows.bat)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-ninja",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "SIM_ENABLE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "86"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-ninja-cpu",
+      "inherits": "windows-ninja",
+      "displayName": "Windows: Ninja, CPU only",
+      "binaryDir": "${sourceDir}/build/windows-ninja-cpu",
+      "cacheVariables": {
+        "SIM_ENABLE_CUDA": "OFF"
+      }
     },
     {
       "name": "linux-cpu",
       "displayName": "Linux: CPU only",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/linux-cpu",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "SIM_ENABLE_CUDA": "OFF" },
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SIM_ENABLE_CUDA": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     },
     {
       "name": "linux-cuda",
       "inherits": "linux-cpu",
       "displayName": "Linux: CUDA",
       "binaryDir": "${sourceDir}/build/linux-cuda",
-      "cacheVariables": { "SIM_ENABLE_CUDA": "ON" }
+      "cacheVariables": {
+        "SIM_ENABLE_CUDA": "ON"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows", "configurePreset": "windows", "configuration": "Release" },
-    { "name": "windows-cpu", "configurePreset": "windows-cpu", "configuration": "Release" },
-    { "name": "linux-cpu", "configurePreset": "linux-cpu" },
-    { "name": "linux-cuda", "configurePreset": "linux-cuda" }
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-cpu",
+      "configurePreset": "windows-cpu",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-ninja",
+      "configurePreset": "windows-ninja"
+    },
+    {
+      "name": "windows-ninja-cpu",
+      "configurePreset": "windows-ninja-cpu"
+    },
+    {
+      "name": "linux-cpu",
+      "configurePreset": "linux-cpu"
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda"
+    }
   ],
   "testPresets": [
-    { "name": "windows", "configurePreset": "windows", "configuration": "Release", "output": { "outputOnFailure": true } },
-    { "name": "windows-cpu", "configurePreset": "windows-cpu", "configuration": "Release", "output": { "outputOnFailure": true } },
-    { "name": "linux-cpu", "configurePreset": "linux-cpu", "output": { "outputOnFailure": true } },
-    { "name": "linux-cuda", "configurePreset": "linux-cuda", "output": { "outputOnFailure": true } }
+    {
+      "name": "windows",
+      "configurePreset": "windows",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-cpu",
+      "configurePreset": "windows-cpu",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-ninja",
+      "configurePreset": "windows-ninja",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-ninja-cpu",
+      "configurePreset": "windows-ninja-cpu",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-cpu",
+      "configurePreset": "linux-cpu",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }
