@@ -1,0 +1,50 @@
+# M0 pipeline test: an analytic fireball (no physics) exported as an OpenVDB
+# sequence, used to check the build, the export and the Blender import.
+#
+#   nukesim scenes/test_fireball.toml
+#   blender --python tools/blender/import_explosion.py -- --dir out/test_fireball
+
+[scene]
+name = "test_fireball"
+type = "test_fireball"
+device = "auto"        # auto | cuda | cpu
+seed = 7
+
+[grid]
+resolution = [160, 160, 192]
+voxel_size = 4.0       # metres
+# origin defaults to centred around ground zero, resting on z = 0
+
+[output]
+dir = "out/test_fireball"
+prefix = "explosion"
+fps = 24
+world_scale = 1.0      # metres -> Blender units
+half_float = true
+prune_tolerance = 1e-4
+fields = ["density", "temperature", "flame", "velocity"]
+preview_every = 12
+start_time = 0.002     # sim time of the first frame, s
+
+# Slow motion easing into real time: sim seconds per video frame ramp
+# geometrically from dt_start to dt_end ...
+[[output.schedule]]
+mode = "ramp"
+frames = 72
+dt_start = 0.0005
+dt_end = 0.0416667
+
+# ... then real time (1/24 s per frame at 24 fps).
+[[output.schedule]]
+mode = "constant"
+frames = 48
+dt = 0.0416667
+
+[test_fireball]
+max_radius = 150.0         # m
+formation_time = 1.0       # s
+rise_speed = 40.0          # m/s
+peak_temperature = 8000.0  # K
+cooling_time = 1.5         # s
+noise_frequency = 0.02     # 1/m
+noise_amplitude = 0.25

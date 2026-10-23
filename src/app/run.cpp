@@ -1,0 +1,188 @@
+#include "app/run.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <stdexcept>
+#include <vector>
+
+#include "core/backend.h"
+#include "core/grid.h"
+#include "core/log.h"
+#include "io/config.h"
+#include "io/manifest.h"
+#include "io/vdb_writer.h"
+#include "preview/preview.h"
+#include "scenes/test_fireball.h"
+
+namespace sim {
+
+namespace {
+
+bool wants(const std::vector<std::string>& fields, const char* name) {
+    return std::find(fields.begin(), fields.end(), name) != fields.end();
+}
+
+void validate_fields(const std::vector<std::string>& fields) {
+    static const char* known[] = {"density", "temperature", "flame", "velocity"};
+    for (const std::string& f : fields) {
+        if (std::none_of(std::begin(known), std::end(known), [&](const char* k) { return f == k; })) {
+            throw std::runtime_error("unknown output field '" + f + "'");
+        }
+    }
+}
+
+std::string frame_file_name(const std::string& prefix, int number) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "_%04d.vdb", number);
+    return prefix + buf;
+}
+
+// Emission-weighted centre and total emitted power (arbitrary units), for the Blender light rig.
+void measure_light(const GridInfo& g, const std::vector<float>& flame, Float3& center, double& power) {
+    double sum = 0.0, cx = 0.0, cy = 0.0, cz = 0.0;
+    for (int k = 0; k < g.dims.z; ++k)
+        for (int j = 0; j < g.dims.y; ++j)
+            for (int i = 0; i < g.dims.x; ++i) {
+                const double f = flame[std::size_t(g.index(i, j, k))];
+                if (f <= 0.0) continue;
+                const Float3 p = g.cell_center(i, j, k);
+                sum += f;
+                cx += f * p.x;
+                cy += f * p.y;
+                cz += f * p.z;
+            }
+    power = sum * double(g.dx) * g.dx * g.dx;
+    center = sum > 0.0 ? Float3{float(cx / sum), float(cy / sum), float(cz / sum)} : Float3{};
+}
+
+}  // namespace
+
+int run_scene(const RunOptions& opt) {
+    SceneConfig cfg = load_scene(opt.scene_path);
+    if (!opt.device.empty()) cfg.device = opt.device;
+    if (!opt.output_dir.empty()) cfg.output.dir = opt.output_dir;
+    if (opt.preview_every >= 0) cfg.output.preview_every = opt.preview_every;
+    validate_fields(cfg.output.fields);
+
+    if (cfg.type != "test_fireball") {
+        throw std::runtime_error("scene type '" + cfg.type + "' is not implemented yet (available: test_fireball)");
+    }
+
+    const Device dev = parse_device(cfg.device);
+    const GridInfo& g = cfg.grid;
+    log_info("scene '%s' (%s) from %s", cfg.name.c_str(), cfg.type.c_str(), cfg.source_path.c_str());
+    log_info("device: %s", device_description(dev).c_str());
+    log_info("grid: %d x %d x %d cells, voxel %.3g m, domain %.0f x %.0f x %.0f m", g.dims.x, g.dims.y, g.dims.z,
+             g.dx, g.extent().x, g.extent().y, g.extent().z);
+
+    std::vector<double> times = cfg.output.schedule.frame_times();
+    log_info("schedule: %s", describe(cfg.output.schedule, cfg.output.fps).c_str());
+    if (opt.max_frames >= 0 && std::size_t(opt.max_frames) < times.size()) times.resize(std::size_t(opt.max_frames));
+
+    const std::filesystem::path out_dir(cfg.output.dir);
+    std::filesystem::create_directories(out_dir);
+    const std::filesystem::path preview_dir = out_dir / "preview";
+    if (cfg.output.preview_every > 0) std::filesystem::create_directories(preview_dir);
+
+    ScalarField density("density", g, dev), temperature("temperature", g, dev), flame("flame", g, dev);
+    ScalarField vel_x("vel_x", g, dev), vel_y("vel_y", g, dev), vel_z("vel_z", g, dev);
+    TestFireballFields fields{&density, &temperature, &flame, &vel_x, &vel_y, &vel_z};
+    log_info("field memory: %s", format_bytes(6.0 * double(density.buffer().bytes())).c_str());
+    if (dev == Device::CUDA) {
+        const DeviceMemoryInfo mem = device_memory_info(dev);
+        log_info("GPU memory: %s free of %s", format_bytes(double(mem.free_bytes)).c_str(),
+                 format_bytes(double(mem.total_bytes)).c_str());
+    }
+
+    const std::size_t n = std::size_t(g.count());
+    std::vector<float> h_density(n), h_temperature(n), h_flame(n), h_vx(n), h_vy(n), h_vz(n);
+
+    Manifest manifest;
+    manifest.scene_name = cfg.name;
+    manifest.prefix = cfg.output.prefix;
+    manifest.fps = cfg.output.fps;
+    manifest.world_scale = cfg.output.world_scale;
+    manifest.fields = cfg.output.fields;
+
+    VdbWriteOptions vdb_opt;
+    vdb_opt.world_scale = cfg.output.world_scale;
+    vdb_opt.half_float = cfg.output.half_float;
+    vdb_opt.tolerance = cfg.output.prune_tolerance;
+
+    const Timer total;
+    double t_sim = 0.0, t_io = 0.0;
+    std::size_t total_bytes = 0;
+    for (std::size_t f = 0; f < times.size(); ++f) {
+        const int number = int(f) + 1;
+        const double t = times[f];
+        // Sim time covered by one video frame around this one: drives motion blur in slow motion.
+        const double sim_dt = times.size() < 2 ? 1.0 / cfg.output.fps
+                              : f == 0      ? times[1] - times[0]
+                                            : times[f] - times[f - 1];
+
+        Timer step;
+        generate_test_fireball(cfg.test_fireball, cfg.seed, t, fields);
+        device_synchronize(dev);
+        t_sim += step.seconds();
+
+        step.reset();
+        density.buffer().download(h_density.data(), n);
+        temperature.buffer().download(h_temperature.data(), n);
+        flame.buffer().download(h_flame.data(), n);
+        vel_x.buffer().download(h_vx.data(), n);
+        vel_y.buffer().download(h_vy.data(), n);
+        vel_z.buffer().download(h_vz.data(), n);
+
+        VdbFrame frame;
+        frame.grid = g;
+        if (wants(cfg.output.fields, "density")) frame.scalars.push_back({"density", h_density.data()});
+        if (wants(cfg.output.fields, "temperature")) frame.scalars.push_back({"temperature", h_temperature.data()});
+        if (wants(cfg.output.fields, "flame")) frame.scalars.push_back({"flame", h_flame.data()});
+        if (wants(cfg.output.fields, "velocity")) {
+            // Exported in world units per *video* second, so Blender's motion blur matches the slow motion.
+            const float scale = float(cfg.output.world_scale * sim_dt * cfg.output.fps);
+            frame.vectors.push_back({"velocity", h_vx.data(), h_vy.data(), h_vz.data(), scale});
+        }
+        frame.metadata["sim_time"] = float(t);
+        frame.metadata["sim_dt"] = float(sim_dt);
+
+        const std::string file = frame_file_name(cfg.output.prefix, number);
+        const VdbWriteStats stats = write_vdb((out_dir / file).string(), frame, vdb_opt);
+        total_bytes += stats.file_bytes;
+
+        ManifestFrame mf;
+        mf.number = number;
+        mf.file = file;
+        mf.sim_time = t;
+        mf.sim_dt = sim_dt;
+        mf.voxel_size = g.dx * cfg.output.world_scale;
+        mf.domain_min = g.origin * cfg.output.world_scale;
+        mf.domain_max = (g.origin + g.extent()) * cfg.output.world_scale;
+        measure_light(g, h_flame, mf.light_position, mf.light_power);
+        mf.light_position = mf.light_position * cfg.output.world_scale;
+        mf.active_voxels = stats.active_voxels;
+        mf.file_bytes = stats.file_bytes;
+        manifest.frames.push_back(mf);
+        write_manifest((out_dir / "manifest.json").string(), manifest);
+
+        if (cfg.output.preview_every > 0 && (f % std::size_t(cfg.output.preview_every) == 0 || f + 1 == times.size())) {
+            char name[32];
+            std::snprintf(name, sizeof(name), "preview_%04d.png", number);
+            PreviewInput pin{g, h_density.data(), h_temperature.data(), h_flame.data()};
+            render_preview_png((preview_dir / name).string(), pin, PreviewOptions{});
+        }
+        t_io += step.seconds();
+
+        log_info("frame %4d/%zu  t=%9.4f s  active=%9zu voxels  file=%s", number, times.size(), t,
+                 stats.active_voxels, format_bytes(double(stats.file_bytes)).c_str());
+    }
+
+    log_info("done: %zu frames in %s (compute %s, export %s), %s written to %s", times.size(),
+             format_seconds(total.seconds()).c_str(), format_seconds(t_sim).c_str(), format_seconds(t_io).c_str(),
+             format_bytes(double(total_bytes)).c_str(), out_dir.string().c_str());
+    return 0;
+}
+
+}  // namespace sim

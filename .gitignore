@@ -1,0 +1,8 @@
+build/
+out/
+*.vdb
+*.vdb.tmp
+__pycache__/
+.vs/
+.vscode/
+CMakeUserPresets.json

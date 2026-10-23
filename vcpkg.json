@@ -1,0 +1,11 @@
+{
+  "name": "nukesim",
+  "version-string": "0.1.0",
+  "description": "Nuclear explosion volume simulator with OpenVDB export",
+  "dependencies": [
+    "openvdb",
+    "tomlplusplus",
+    "doctest",
+    "stb"
+  ]
+}
