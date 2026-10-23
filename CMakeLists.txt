@@ -69,6 +69,7 @@ set(SIM_KERNEL_SOURCES
   src/lowmach/solver.cpp
   src/scenes/test_fireball.cpp
   src/scenes/fireball_rise.cpp
+  src/compressible/euler.cpp
 )
 
 set(SIM_HOST_SOURCES
@@ -82,6 +83,7 @@ set(SIM_HOST_SOURCES
   src/preview/preview.cpp
   src/physics/atmosphere.cpp
   src/scenes/scene.cpp
+  src/scenes/surface_burst.cpp
   src/app/run.cpp
 )
 
@@ -129,6 +131,7 @@ if(SIM_BUILD_TESTS)
     tests/test_vdb.cpp
     tests/test_config.cpp
     tests/test_lowmach.cpp
+    tests/test_compressible.cpp
   )
   target_include_directories(simtests SYSTEM PRIVATE ${DOCTEST_INCLUDE_DIR})
   target_link_libraries(simtests PRIVATE simcore)

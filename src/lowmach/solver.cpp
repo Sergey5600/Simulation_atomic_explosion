@@ -231,6 +231,59 @@ void LowMachSolver::coarsen_domain() {
     project(vel_);
 }
 
+void LowMachSolver::load_cell_state(const std::vector<float>& temperature, const std::vector<float>& smoke_in,
+                                    const std::vector<float>* dust_bins, const std::vector<float>& u_in,
+                                    const std::vector<float>& v_in, const std::vector<float>& w_in) {
+    const Int3 n = grid_.dims;
+    const std::size_t cells = std::size_t(grid_.count());
+    if (temperature.size() != cells || smoke_in.size() != cells || u_in.size() != cells || v_in.size() != cells ||
+        w_in.size() != cells) {
+        throw std::invalid_argument("load_cell_state: arrays do not match the grid");
+    }
+    // Temperature -> potential temperature, on the device.
+    scalars_next_[kTheta].upload(temperature.data(), cells);
+    const FieldView tin{scalars_next_[kTheta].data(), n};
+    FieldView th = theta();
+    const float* exner = ambient_.exner.data();
+    const float* t_amb = ambient_.temperature.data();
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        th(i, j, k) = fmaxf(tin(i, j, k), 0.5f * t_amb[k]) / exner[k];
+    });
+    scalars_[kSmoke].upload(smoke_in.data(), cells);
+    if (dust_.enabled && dust_bins) {
+        for (int b = 0; b < kDustBins; ++b) scalars_[std::size_t(kDust0 + b)].upload(dust_bins[b].data(), cells);
+    }
+
+    // Cell velocities -> faces (mean of the two neighbours; outer faces take the boundary cell).
+    Buffer<float>& cu = scalars_next_[kTheta];
+    Buffer<float>& cv = scalars_bwd_[kTheta];
+    Buffer<float>& cw = scalars_next_[kSmoke];
+    cu.upload(u_in.data(), cells);
+    cv.upload(v_in.data(), cells);
+    cw.upload(w_in.data(), cells);
+    const FieldView fu{cu.data(), n}, fv{cv.data(), n}, fw{cw.data(), n};
+    FieldView u = vel_.u_view(), v = vel_.v_view(), w = vel_.w_view();
+    parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = i > 0 ? i - 1 : 0, b = i < n.x ? i : n.x - 1;
+        u(i, j, k) = 0.5f * (fu(a, j, k) + fu(b, j, k));
+    });
+    parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = j > 0 ? j - 1 : 0, b = j < n.y ? j : n.y - 1;
+        v(i, j, k) = 0.5f * (fv(i, a, k) + fv(i, b, k));
+    });
+    parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        if (k == 0) {
+            w(i, j, k) = 0.f;
+            return;
+        }
+        const int b = k < n.z ? k : n.z - 1;
+        w(i, j, k) = 0.5f * (fw(i, j, k - 1) + fw(i, j, b));
+    });
+    source_.zero();
+    update_density();
+    project(vel_);
+}
+
 CloudExtent LowMachSolver::cloud_extent(float smoke_threshold) {
     const GridInfo g = grid_;
     FieldView sm = smoke();

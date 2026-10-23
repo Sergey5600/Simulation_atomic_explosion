@@ -61,100 +61,95 @@ void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const Dust
     }
 }
 
+RisePhase::RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm)
+    : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust) {
+    solver_.reset_to_ambient(cfg.wind);
+    if (cfg.domain.expand && !LowMachSolver::can_coarsen(cfg.grid.dims)) {
+        log_warn("domain.expand needs grid x, y divisible by 4 and z by 2: the domain will not grow");
+    }
+}
+
+void RisePhase::advance_to(double t) {
+    if (t < time_ - 1e-9) throw std::runtime_error("frame time is before the start of the buoyant phase");
+    steps_ = 0;
+    iterations_ = 0;
+    projections_ = 0;
+    residual_ = 0.0;
+    while (time_ < t - 1e-9) {
+        double dt = solver_.suggest_dt();
+        const double remaining = t - time_;
+        // Land exactly on the frame time without a tiny last step.
+        if (dt >= remaining) dt = remaining;
+        else if (dt > 0.5 * remaining) dt = 0.5 * remaining;
+        const StepStats s = solver_.step(dt);
+        time_ += dt;
+        maybe_grow_domain();
+        ++steps_;
+        iterations_ += s.pcg_iterations;
+        projections_ += s.projections;
+        residual_ = std::max(residual_, s.max_residual);
+        last_dt_ = dt;
+    }
+}
+
+void RisePhase::fill_export(ExportBuffers& out) {
+    solver_.fill_export(out.density.view(), out.dust.view(), out.temperature.view(), out.flame.view(),
+                        out.vel_x.view(), out.vel_y.view(), out.vel_z.view(), cfg_.fireball.flame_temperature);
+}
+
+std::string RisePhase::status() {
+    const CloudDiagnostics d = solver_.diagnostics();
+    char buf[256];
+    std::snprintf(buf, sizeof(buf),
+                  "steps=%d dt=%.3fs pcg=%.1f it/solve res=%.1e | Tmax=%.0fK top=%.0fm centroid=%.0fm "
+                  "|u|max=%.0fm/s at z=%.0fm dust=%.0ft",
+                  steps_, last_dt_, projections_ ? double(iterations_) / projections_ : 0.0, residual_,
+                  double(solver_.max_temperature()), double(d.top), double(d.centroid_z), double(d.max_speed),
+                  double(d.max_speed_z), d.dust_tonnes);
+    return buf;
+}
+
+void RisePhase::maybe_grow_domain() {
+    const DomainConfig& d = cfg_.domain;
+    if (!d.expand || expansions_ >= d.max_expansions || !LowMachSolver::can_coarsen(cfg_.grid.dims)) return;
+    if (++steps_since_check_ < 5) return;
+    steps_since_check_ = 0;
+    const GridInfo g = solver_.grid();
+    const CloudExtent e = solver_.cloud_extent(d.smoke_threshold);
+    const float height = g.dims.z * g.dx;
+    const float half_width = 0.5f * std::min(g.dims.x, g.dims.y) * g.dx;
+    if (e.top < d.trigger * height && e.radius < d.trigger * half_width) return;
+    solver_.coarsen_domain();
+    ++expansions_;
+    const GridInfo ng = solver_.grid();
+    log_info("domain grown (cloud top %.0f m, radius %.0f m): voxel %.3g m, domain %.0f x %.0f x %.0f m", e.top,
+             e.radius, ng.dx, ng.extent().x, ng.extent().y, ng.extent().z);
+}
+
 namespace {
 
 class FireballRiseScene final : public Scene {
 public:
-    FireballRiseScene(const SceneConfig& cfg, Device dev)
-        : cfg_(cfg),
-          atmosphere_(cfg.atmosphere),
-          solver_(dev, cfg.grid, atmosphere_, cfg.solver, cfg.radiation, cfg.dust) {
-        solver_.reset_to_ambient(cfg.wind);
-        init_fireball(solver_, cfg.fireball, cfg.seed);
-        init_dust(solver_, cfg.fireball, cfg.dust_init, cfg.seed);
-        time_ = cfg.fireball.start_time;
+    FireballRiseScene(const SceneConfig& cfg, Device dev) : atmosphere_(cfg.atmosphere), rise_(cfg, dev, atmosphere_) {
+        init_fireball(rise_.solver(), cfg.fireball, cfg.seed);
+        init_dust(rise_.solver(), cfg.fireball, cfg.dust_init, cfg.seed);
+        rise_.set_time(cfg.fireball.start_time);
         const AtmosphereState ground = atmosphere_.at(0.0);
         log_info("atmosphere at ground: %.1f K, %.0f Pa, %.3f kg/m^3", ground.temperature, ground.pressure,
                  ground.density);
         log_info("fireball: radius %.0f m, core %.0f K, starts at t = %.2f s", cfg.fireball.radius,
                  cfg.fireball.temperature, cfg.fireball.start_time);
-        if (cfg.domain.expand && !LowMachSolver::can_coarsen(cfg.grid.dims)) {
-            log_warn("domain.expand needs grid x, y divisible by 4 and z by 2: the domain will not grow");
-        }
     }
 
-    GridInfo grid() const override { return solver_.grid(); }
-
-    void advance_to(double t) override {
-        if (t < time_ - 1e-9) {
-            throw std::runtime_error("fireball_rise: frame time is before fireball.start_time; set "
-                                     "output.start_time >= fireball.start_time");
-        }
-        steps_ = 0;
-        iterations_ = 0;
-        projections_ = 0;
-        residual_ = 0.0;
-        while (time_ < t - 1e-9) {
-            double dt = solver_.suggest_dt();
-            const double remaining = t - time_;
-            // Land exactly on the frame time without a tiny last step.
-            if (dt >= remaining) dt = remaining;
-            else if (dt > 0.5 * remaining) dt = 0.5 * remaining;
-            const StepStats s = solver_.step(dt);
-            time_ += dt;
-            maybe_grow_domain();
-            ++steps_;
-            iterations_ += s.pcg_iterations;
-            projections_ += s.projections;
-            residual_ = std::max(residual_, s.max_residual);
-            last_dt_ = dt;
-        }
-    }
-
-    void fill_export(ExportBuffers& out) override {
-        solver_.fill_export(out.density.view(), out.dust.view(), out.temperature.view(), out.flame.view(), out.vel_x.view(),
-                            out.vel_y.view(), out.vel_z.view(), cfg_.fireball.flame_temperature);
-    }
-
-    std::string status() override {
-        const CloudDiagnostics d = solver_.diagnostics();
-        char buf[256];
-        std::snprintf(buf, sizeof(buf),
-                      "steps=%d dt=%.3fs pcg=%.1f it/solve res=%.1e | Tmax=%.0fK top=%.0fm centroid=%.0fm "
-                      "|u|max=%.0fm/s at z=%.0fm dust=%.0ft",
-                      steps_, last_dt_, projections_ ? double(iterations_) / projections_ : 0.0, residual_,
-                      double(solver_.max_temperature()), double(d.top), double(d.centroid_z), double(d.max_speed),
-                      double(d.max_speed_z), d.dust_tonnes);
-        return buf;
-    }
-
-    std::size_t memory_bytes() const override { return solver_.memory_bytes(); }
+    GridInfo grid() const override { return rise_.grid(); }
+    void advance_to(double t) override { rise_.advance_to(t); }
+    void fill_export(ExportBuffers& out) override { rise_.fill_export(out); }
+    std::string status() override { return rise_.status(); }
+    std::size_t memory_bytes() const override { return rise_.memory_bytes(); }
 
 private:
-    void maybe_grow_domain() {
-        const DomainConfig& d = cfg_.domain;
-        if (!d.expand || expansions_ >= d.max_expansions || !LowMachSolver::can_coarsen(cfg_.grid.dims)) return;
-        if (++steps_since_check_ < 5) return;
-        steps_since_check_ = 0;
-        const GridInfo g = solver_.grid();
-        const CloudExtent e = solver_.cloud_extent(d.smoke_threshold);
-        const float height = g.dims.z * g.dx;
-        const float half_width = 0.5f * std::min(g.dims.x, g.dims.y) * g.dx;
-        if (e.top < d.trigger * height && e.radius < d.trigger * half_width) return;
-        solver_.coarsen_domain();
-        ++expansions_;
-        const GridInfo ng = solver_.grid();
-        log_info("domain grown (cloud top %.0f m, radius %.0f m): voxel %.3g m, domain %.0f x %.0f x %.0f m", e.top,
-                 e.radius, ng.dx, ng.extent().x, ng.extent().y, ng.extent().z);
-    }
-
-    SceneConfig cfg_;
     Atmosphere atmosphere_;
-    LowMachSolver solver_;
-    double time_ = 0.0;
-    int expansions_ = 0, steps_since_check_ = 0;
-    int steps_ = 0, iterations_ = 0, projections_ = 0;
-    double residual_ = 0.0, last_dt_ = 0.0;
+    RisePhase rise_;
 };
 
 }  // namespace

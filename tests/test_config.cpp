@@ -37,3 +37,16 @@ TEST_CASE("fireball scenes parse") {
         CHECK(cfg.solver.reflection);
     }
 }
+
+TEST_CASE("surface burst scenes parse") {
+    for (const char* name : {"/scenes/surface_burst_20kt.toml", "/scenes/surface_burst_preview.toml"}) {
+        CAPTURE(name);
+        const SceneConfig cfg = load_scene(std::string(SIM_SOURCE_DIR) + name);
+        CHECK(cfg.type == "surface_burst");
+        CHECK(cfg.output.schedule.start_time >= cfg.blast.start_time - 1e-6);
+        CHECK(cfg.blast.yield_kt == doctest::Approx(20.f));
+        CHECK(cfg.blast.handoff_time > cfg.blast.start_time);
+        CHECK(cfg.dust_init.skirt_loading == 0.f);
+        CHECK(cfg.grid.dims.x % 16 == 0);
+    }
+}

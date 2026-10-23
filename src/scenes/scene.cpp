@@ -3,6 +3,7 @@
 #include <stdexcept>
 
 #include "scenes/fireball_rise.h"
+#include "scenes/surface_burst.h"
 #include "scenes/test_fireball.h"
 
 namespace sim {
@@ -32,7 +33,9 @@ private:
 std::unique_ptr<Scene> make_scene(const SceneConfig& cfg, Device dev) {
     if (cfg.type == "test_fireball") return std::make_unique<TestFireballScene>(cfg);
     if (cfg.type == "fireball_rise") return make_fireball_rise_scene(cfg, dev);
-    throw std::runtime_error("unknown scene type '" + cfg.type + "' (available: test_fireball, fireball_rise)");
+    if (cfg.type == "surface_burst") return make_surface_burst_scene(cfg, dev);
+    throw std::runtime_error("unknown scene type '" + cfg.type +
+                             "' (available: test_fireball, fireball_rise, surface_burst)");
 }
 
 }  // namespace sim

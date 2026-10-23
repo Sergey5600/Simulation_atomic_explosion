@@ -96,6 +96,13 @@ public:
     static bool can_coarsen(Int3 dims) { return dims.x % 4 == 0 && dims.y % 4 == 0 && dims.z % 2 == 0; }
     CloudExtent cloud_extent(float smoke_threshold);
 
+    // Replaces the state with host data on this grid (cell centred), e.g. from the
+    // compressible stage: temperature in K, mass fractions, cell velocities. The
+    // velocity is moved to the faces and projected.
+    void load_cell_state(const std::vector<float>& temperature, const std::vector<float>& smoke,
+                         const std::vector<float>* dust_bins, const std::vector<float>& u,
+                         const std::vector<float>& v, const std::vector<float>& w);
+
     // Largest stable time step for the current state (capped by params.max_dt).
     double suggest_dt();
     StepStats step(double dt);

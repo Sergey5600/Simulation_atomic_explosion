@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/grid.h"
+#include "compressible/euler.h"
 #include "core/schedule.h"
 #include "lowmach/solver.h"
 #include "physics/atmosphere.h"
@@ -88,6 +89,7 @@ struct SceneConfig {
     DustParams dust;
     DustInitConfig dust_init;
     DomainConfig domain;
+    BlastParams blast;
 };
 
 SceneConfig load_scene(const std::string& path);

@@ -193,6 +193,27 @@ void parse_domain(const toml::table& t, DomainConfig& d) {
     if (d.trigger <= 0.f || d.trigger > 1.f) fail("domain.trigger must be in (0, 1]");
 }
 
+void parse_blast(const toml::table& t, BlastParams& b) {
+    b.start_time = float(get_or<double>(t, "start_time", b.start_time));
+    b.yield_kt = float(get_or<double>(t, "yield_kt", b.yield_kt));
+    b.hydro_fraction = float(get_or<double>(t, "hydro_fraction", b.hydro_fraction));
+    b.deposit_radius = float(get_or<double>(t, "deposit_radius", b.deposit_radius));
+    b.noise_amplitude = float(get_or<double>(t, "noise_amplitude", b.noise_amplitude));
+    b.noise_frequency = float(get_or<double>(t, "noise_frequency", b.noise_frequency));
+    b.handoff_time = float(get_or<double>(t, "handoff_time", b.handoff_time));
+    b.gamma = float(get_or<double>(t, "gamma", b.gamma));
+    b.cfl = float(get_or<double>(t, "cfl", b.cfl));
+    b.radiation_temperature_cap = float(get_or<double>(t, "radiation_temperature_cap", b.radiation_temperature_cap));
+    b.radiation_length = float(get_or<double>(t, "radiation_length", b.radiation_length));
+    b.fireball_temperature = float(get_or<double>(t, "fireball_temperature", b.fireball_temperature));
+    b.fireball_dust_loading = float(get_or<double>(t, "fireball_dust_loading", b.fireball_dust_loading));
+    bins(t, "fireball_dust_split", b.fireball_dust_split);
+    b.blast_erosion = float(get_or<double>(t, "erosion", b.blast_erosion));
+    if (b.yield_kt <= 0.f || b.deposit_radius <= 0.f || b.handoff_time <= b.start_time) {
+        fail("blast: yield_kt and deposit_radius must be > 0 and handoff_time > start_time");
+    }
+}
+
 void parse_solver(const toml::table& t, SolverParams& c) {
     c.cfl = float(get_or<double>(t, "cfl", c.cfl));
     c.max_dt = float(get_or<double>(t, "max_dt", c.max_dt));
@@ -241,6 +262,7 @@ SceneConfig load_scene(const std::string& path) {
     if (const auto* t = subtable(root, "solver")) parse_solver(*t, cfg.solver);
     if (const auto* t = subtable(root, "dust")) parse_dust(*t, cfg.dust, cfg.dust_init);
     if (const auto* t = subtable(root, "domain")) parse_domain(*t, cfg.domain);
+    if (const auto* t = subtable(root, "blast")) parse_blast(*t, cfg.blast);
     return cfg;
 }
 

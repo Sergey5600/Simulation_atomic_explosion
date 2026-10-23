@@ -1,0 +1,97 @@
+# CPU-sized check of scenes/surface_burst_20kt.toml (16 m voxels, few frames).
+
+[scene]
+name = "surface_burst_preview"
+type = "surface_burst"
+device = "auto"
+seed = 11
+
+[grid]
+resolution = [96, 96, 64]      # low resolution for a CPU check
+voxel_size = 16.0              # m -> 1.5 x 1.5 x 1.0 km at the start
+
+[output]
+dir = "out/surface_burst_preview"
+prefix = "explosion"
+fps = 24
+fields = ["density", "dust", "temperature", "flame", "velocity"]
+preview_every = 10
+start_time = 0.002             # s; must not be earlier than blast.start_time
+
+# Slow motion: sim seconds per video frame grow from 0.5 ms to real time (1/24 s)
+# over the first 10 s of video, which covers about the first 2 s of the explosion...
+[[output.schedule]]
+mode = "ramp"
+frames = 60
+dt_start = 0.002
+dt_end = 0.0416667
+
+# ... then 20 s of real time.
+[[output.schedule]]
+mode = "constant"
+frames = 40
+dt = 0.25
+
+[atmosphere]
+ground_altitude = 1200.0       # m above sea level
+ground_temperature = 303.0     # K (30 C, desert)
+
+[wind]
+heading = 30.0                 # degrees from +X towards +Y (the direction it blows to)
+profile = [[0.0, 1.5], [10.0, 2.0], [3000.0, 6.0], [10000.0, 8.0]]   # [height m, speed m/s]
+
+[blast]
+start_time = 0.002             # s
+yield_kt = 20.0
+hydro_fraction = 0.55          # share of the yield driving the blast
+deposit_radius = 48.0          # m, three voxels at this resolution
+noise_amplitude = 0.08         # seeds the fireball surface instabilities
+noise_frequency = 0.08         # 1/m
+handoff_time = 1.0             # s, switch to the buoyant-phase solver
+radiation_temperature_cap = 8000.0   # K, hottest apparent fireball surface
+radiation_length = 150.0       # m, about the fireball radius
+fireball_temperature = 2000.0  # K, air hotter than this becomes fireball gas
+fireball_dust_loading = 0.02   # kg soil per kg air in the initial hemisphere
+erosion = 3e-4                 # dust lifted by the blast wind
+
+[fireball]
+flame_temperature = 6000.0     # K at which the exported flame field is 1
+
+[radiation]
+absorption = 3e-4              # 1/m at reference_temperature
+reference_temperature = 3000.0
+exponent = 2.0
+
+[solver]
+cfl = 1.0
+max_dt = 0.1
+reflection = true
+vorticity_confinement = 0.15
+smagorinsky = 0.15             # subgrid turbulent mixing (0 = off)
+pressure_tolerance = 1e-4
+
+[dust]
+enabled = true
+# Three size bins: fine (stays aloft, colours the cap), medium, coarse (falls back in curtains).
+settling = [0.02, 0.4, 2.5]          # m/s terminal fall speed per bin
+optical_weight = [1.0, 0.35, 0.1]    # how much each bin darkens the volume per unit mass
+# Soil engulfed by the fireball (vaporised and pulverised at ground zero).
+fireball_loading = 0.0                # set in [blast] instead
+fireball_split = [0.5, 0.3, 0.2]
+# Skirt of dust raised along the ground by the blast wave before t = 1 s.
+skirt_radius = 700.0                 # m
+skirt_height = 120.0                 # m at ground zero
+skirt_loading = 0.0                  # the blast raises the skirt itself in this scene
+skirt_split = [0.4, 0.45, 0.15]
+# Sand lifted by the afterwind sucked in under the rising fireball (forms the stem).
+erosion = 0.03                       # vertical dust flux coefficient (blast-driven, very high)
+threshold_friction_velocity = 0.3    # m/s, loose desert sand
+roughness_length = 0.001             # m
+erosion_split = [0.3, 0.5, 0.2]
+mass_loading = true                  # dust weighs the air down
+render_scale = 100.0                 # exported "dust" grid = scale x optical dust concentration
+
+[domain]
+expand = true                  # double voxel size and domain when the cloud nears the edge
+trigger = 0.8                  # fraction of the domain height / half-width
+max_expansions = 4
