@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/field_ops.h"
+#include "core/memory.h"
 #include "lowmach/advection.h"
 #include "lowmach/pressure.h"
 #include "lowmach/solver.h"
@@ -269,9 +270,10 @@ TEST_CASE("hot fireball rises and cools") {
         init_fireball(solver, fb, 3);
 
         auto hot_centroid_z = [&]() {
-            ScalarField d("d", g, solver.device()), t("t", g, solver.device()), f("f", g, solver.device()),
-                vx("vx", g, solver.device()), vy("vy", g, solver.device()), vz("vz", g, solver.device());
-            solver.fill_export(d.view(), t.view(), f.view(), vx.view(), vy.view(), vz.view(), 6000.f);
+            ScalarField d("d", g, solver.device()), du("du", g, solver.device()), t("t", g, solver.device()),
+                f("f", g, solver.device()), vx("vx", g, solver.device()), vy("vy", g, solver.device()),
+                vz("vz", g, solver.device());
+            solver.fill_export(d.view(), du.view(), t.view(), f.view(), vx.view(), vy.view(), vz.view(), 6000.f);
             const std::vector<float> dens = d.buffer().to_host();
             double m = 0.0, z = 0.0;
             for (int k = 0; k < g.dims.z; ++k)
@@ -302,4 +304,151 @@ TEST_CASE("hot fireball rises and cools") {
         CHECK(solver.max_speed() > 20.f);
         CHECK(solver.max_speed() < 400.f);
     }
+}
+
+namespace {
+
+// Dust-weighted mean height and total dust (sum of mixing ratios) of one bin.
+void dust_moments(LowMachSolver& solver, int bin, double& total, double& mean_z) {
+    const GridInfo& g = solver.grid();
+    const FieldView v = solver.dust(bin);
+    std::vector<float> h(std::size_t(g.count()));
+    device_copy(h.data(), Device::CPU, v.data, solver.device(), h.size() * sizeof(float));
+    total = 0.0;
+    double z = 0.0;
+    for (int k = 0; k < g.dims.z; ++k)
+        for (int j = 0; j < g.dims.y; ++j)
+            for (int i = 0; i < g.dims.x; ++i) {
+                const double y = h[std::size_t(g.index(i, j, k))];
+                total += y;
+                z += y * (k + 0.5) * g.dx;
+            }
+    mean_z = total > 0.0 ? z / total : 0.0;
+}
+
+GridInfo dust_grid() {
+    GridInfo g;
+    g.dims = Int3{16, 16, 32};
+    g.dx = 20.f;
+    g.origin = Float3{-160.f, -160.f, 0.f};
+    return g;
+}
+
+}  // namespace
+
+TEST_CASE("dust settles at its fall speed and deposits on the ground") {
+    const GridInfo g = dust_grid();
+    const Atmosphere atm{AtmosphereConfig{}};
+    DustParams dp;
+    dp.erosion = 0.f;
+    LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, dp);
+    solver.reset_to_ambient(WindProfile{});
+    FireballConfig no_fireball;
+    DustInitConfig init;
+    init.fireball_loading = 0.f;
+    init.skirt_radius = 1e6f;  // a uniform layer over the whole domain
+    init.skirt_height = 300.f;
+    init.skirt_loading = 0.001f;  // light enough not to drive a density current
+    init_dust(solver, no_fireball, init, 1);
+
+    double total0[kDustBins], z0[kDustBins];
+    for (int b = 0; b < kDustBins; ++b) dust_moments(solver, b, total0[b], z0[b]);
+    const double t_end = 20.0;
+    for (double t = 0.0; t < t_end - 1e-9; t += 0.5) solver.step(0.5);
+    double total[kDustBins], z[kDustBins];
+    for (int b = 0; b < kDustBins; ++b) dust_moments(solver, b, total[b], z[b]);
+    MESSAGE("fine: " << z0[0] << " -> " << z[0] << " m, coarse: " << z0[2] << " -> " << z[2] << " m, coarse left "
+                     << total[2] / total0[2]);
+    // Fine dust (2 cm/s) barely moves; coarse dust (2.5 m/s) falls ~50 m and partly lands.
+    CHECK(std::abs(z[0] - z0[0]) < 5.0);
+    CHECK(z0[2] - z[2] > 15.0);
+    CHECK(total[2] < 0.95 * total0[2]);
+    CHECK(total[0] == doctest::Approx(total0[0]).epsilon(0.03));
+}
+
+TEST_CASE("strong wind lifts sand from the ground, a light breeze does not") {
+    const GridInfo g = dust_grid();
+    const Atmosphere atm{AtmosphereConfig{}};
+    for (const float speed : {2.f, 60.f}) {
+        CAPTURE(speed);
+        LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, DustParams{});
+        WindProfile wind;
+        wind.points = {{0.f, speed}, {1000.f, speed}};
+        solver.reset_to_ambient(wind);
+        for (int s = 0; s < 10; ++s) solver.step(0.25);
+        double total = 0.0, mean = 0.0;
+        dust_moments(solver, 0, total, mean);
+        if (speed < 10.f) CHECK(total == 0.0);
+        else CHECK(total > 1e-4);
+    }
+}
+
+TEST_CASE("dust loading weighs the rising fireball down") {
+    double rise[2];
+    for (int heavy = 0; heavy < 2; ++heavy) {
+        const GridInfo g = dust_grid();
+        const Atmosphere atm{AtmosphereConfig{}};
+        LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, DustParams{});
+        solver.reset_to_ambient(WindProfile{});
+        FireballConfig fb;
+        fb.radius = 80.f;
+        fb.temperature = 1200.f;
+        fb.noise_amplitude = 0.f;
+        init_fireball(solver, fb, 5);
+        DustInitConfig init;
+        init.fireball_loading = heavy ? 2.0f : 0.f;  // more dust than air by mass
+        init.fireball_split[0] = 1.f;
+        init.fireball_split[1] = init.fireball_split[2] = 0.f;
+        init.skirt_loading = 0.f;
+        init_dust(solver, fb, init, 5);
+        for (int s = 0; s < 20; ++s) solver.step(0.25);
+        rise[heavy] = solver.diagnostics().centroid_z;
+    }
+    MESSAGE("smoke centroid after 5 s: clean " << rise[0] << " m, dusty " << rise[1] << " m");
+    CHECK(rise[1] < rise[0] - 10.0);
+}
+
+TEST_CASE("growing the domain keeps the cloud and doubles the extent") {
+    GridInfo g;
+    g.dims = Int3{32, 32, 32};
+    g.dx = 10.f;
+    g.origin = Float3{-160.f, -160.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{}, DustParams{});
+    WindProfile wind;
+    wind.points = {{0.f, 3.f}, {1000.f, 3.f}};
+    solver.reset_to_ambient(wind);
+    FireballConfig fb;
+    fb.radius = 60.f;
+    fb.temperature = 1500.f;
+    init_fireball(solver, fb, 2);
+    for (int s = 0; s < 4; ++s) solver.step(0.2);
+
+    auto smoke_mass = [&]() {
+        const GridInfo& gg = solver.grid();
+        std::vector<float> h(std::size_t(gg.count()));
+        device_copy(h.data(), Device::CPU, solver.smoke().data, solver.device(), h.size() * sizeof(float));
+        double m = 0.0;
+        for (float v : h) m += v;
+        return m * double(gg.dx) * gg.dx * gg.dx;
+    };
+    const double m0 = smoke_mass();
+    const CloudExtent e0 = solver.cloud_extent(0.02f);
+    solver.coarsen_domain();
+    const GridInfo& ng = solver.grid();
+    CHECK(ng.dx == doctest::Approx(20.f));
+    CHECK(ng.origin.x == doctest::Approx(-320.f));
+    CHECK(ng.origin.z == doctest::Approx(0.f));
+    CHECK(smoke_mass() == doctest::Approx(m0).epsilon(1e-4));
+    const CloudExtent e1 = solver.cloud_extent(0.02f);
+    CHECK(e1.top >= e0.top - 20.f);
+    CHECK(std::isfinite(solver.max_speed()));
+    CHECK(solver.max_speed() < 200.f);
+    // The new outer region carries the ambient wind.
+    const std::vector<float> u = solver.velocity().u.to_host();
+    const Int3 nu = u_dims(ng.dims);
+    CHECK(u[std::size_t(1 + nu.x * (1 + std::int64_t(nu.y) * 20))] == doctest::Approx(3.f).epsilon(0.05));
+    // And it keeps running.
+    for (int s = 0; s < 4; ++s) solver.step(solver.suggest_dt());
+    CHECK(std::isfinite(solver.max_speed()));
 }

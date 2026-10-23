@@ -17,6 +17,8 @@ struct ManifestFrame {
     float voxel_size = 0.f;    // in exported units
     Float3 domain_min;         // simulation domain bounds, exported units
     Float3 domain_max;
+    Float3 cloud_min;          // bounds of the visible volume, exported units
+    Float3 cloud_max;
     Float3 light_position;     // emission-weighted centre, exported units
     double light_power = 0.0;  // relative radiated power (arbitrary units)
     std::size_t active_voxels = 0;

@@ -25,7 +25,7 @@ bool wants(const std::vector<std::string>& fields, const char* name) {
 }
 
 void validate_fields(const std::vector<std::string>& fields) {
-    static const char* known[] = {"density", "temperature", "flame", "velocity"};
+    static const char* known[] = {"density", "dust", "temperature", "flame", "velocity"};
     for (const std::string& f : fields) {
         if (std::none_of(std::begin(known), std::end(known), [&](const char* k) { return f == k; })) {
             throw std::runtime_error("unknown output field '" + f + "'");
@@ -55,6 +55,26 @@ void measure_light(const GridInfo& g, const std::vector<float>& flame, Float3& c
             }
     power = sum * double(g.dx) * g.dx * g.dx;
     center = sum > 0.0 ? Float3{float(cx / sum), float(cy / sum), float(cz / sum)} : Float3{};
+}
+
+// Bounds of the cells that would be visible in a render.
+void measure_cloud(const GridInfo& g, const std::vector<float>& density, const std::vector<float>& dust,
+                   const std::vector<float>& flame, Float3& lo, Float3& hi) {
+    int i0 = g.dims.x, j0 = g.dims.y, k0 = g.dims.z, i1 = -1, j1 = -1, k1 = -1;
+    for (int k = 0; k < g.dims.z; ++k)
+        for (int j = 0; j < g.dims.y; ++j)
+            for (int i = 0; i < g.dims.x; ++i) {
+                const std::size_t idx = std::size_t(g.index(i, j, k));
+                if (density[idx] <= 1e-3f && dust[idx] <= 1e-3f && flame[idx] <= 1e-4f) continue;
+                i0 = std::min(i0, i), j0 = std::min(j0, j), k0 = std::min(k0, k);
+                i1 = std::max(i1, i), j1 = std::max(j1, j), k1 = std::max(k1, k);
+            }
+    if (i1 < 0) {
+        lo = hi = Float3{};
+        return;
+    }
+    lo = g.origin + Float3{float(i0), float(j0), float(k0)} * g.dx;
+    hi = g.origin + Float3{float(i1 + 1), float(j1 + 1), float(k1 + 1)} * g.dx;
 }
 
 }  // namespace
@@ -93,7 +113,7 @@ int run_scene(const RunOptions& opt) {
     }
 
     const std::size_t n = std::size_t(g.count());
-    std::vector<float> h_density(n), h_temperature(n), h_flame(n), h_vx(n), h_vy(n), h_vz(n);
+    std::vector<float> h_density(n), h_dust(n), h_temperature(n), h_flame(n), h_vx(n), h_vy(n), h_vz(n);
 
     Manifest manifest;
     manifest.scene_name = cfg.name;
@@ -127,15 +147,18 @@ int run_scene(const RunOptions& opt) {
 
         step.reset();
         exp.density.buffer().download(h_density.data(), n);
+        exp.dust.buffer().download(h_dust.data(), n);
         exp.temperature.buffer().download(h_temperature.data(), n);
         exp.flame.buffer().download(h_flame.data(), n);
         exp.vel_x.buffer().download(h_vx.data(), n);
         exp.vel_y.buffer().download(h_vy.data(), n);
         exp.vel_z.buffer().download(h_vz.data(), n);
 
+        const GridInfo fg = scene->grid();  // the domain may have grown
         VdbFrame frame;
-        frame.grid = g;
+        frame.grid = fg;
         if (wants(cfg.output.fields, "density")) frame.scalars.push_back({"density", h_density.data()});
+        if (wants(cfg.output.fields, "dust")) frame.scalars.push_back({"dust", h_dust.data()});
         if (wants(cfg.output.fields, "temperature")) frame.scalars.push_back({"temperature", h_temperature.data()});
         if (wants(cfg.output.fields, "flame")) frame.scalars.push_back({"flame", h_flame.data()});
         if (wants(cfg.output.fields, "velocity")) {
@@ -155,10 +178,13 @@ int run_scene(const RunOptions& opt) {
         mf.file = file;
         mf.sim_time = t;
         mf.sim_dt = sim_dt;
-        mf.voxel_size = g.dx * cfg.output.world_scale;
-        mf.domain_min = g.origin * cfg.output.world_scale;
-        mf.domain_max = (g.origin + g.extent()) * cfg.output.world_scale;
-        measure_light(g, h_flame, mf.light_position, mf.light_power);
+        mf.voxel_size = fg.dx * cfg.output.world_scale;
+        mf.domain_min = fg.origin * cfg.output.world_scale;
+        mf.domain_max = (fg.origin + fg.extent()) * cfg.output.world_scale;
+        measure_light(fg, h_flame, mf.light_position, mf.light_power);
+        measure_cloud(fg, h_density, h_dust, h_flame, mf.cloud_min, mf.cloud_max);
+        mf.cloud_min = mf.cloud_min * cfg.output.world_scale;
+        mf.cloud_max = mf.cloud_max * cfg.output.world_scale;
         mf.light_position = mf.light_position * cfg.output.world_scale;
         mf.active_voxels = stats.active_voxels;
         mf.file_bytes = stats.file_bytes;
@@ -168,7 +194,7 @@ int run_scene(const RunOptions& opt) {
         if (cfg.output.preview_every > 0 && (f % std::size_t(cfg.output.preview_every) == 0 || f + 1 == times.size())) {
             char name[32];
             std::snprintf(name, sizeof(name), "preview_%04d.png", number);
-            PreviewInput pin{g, h_density.data(), h_temperature.data(), h_flame.data()};
+            PreviewInput pin{fg, h_density.data(), h_temperature.data(), h_flame.data(), h_dust.data()};
             render_preview_png((preview_dir / name).string(), pin, PreviewOptions{});
         }
         t_io += step.seconds();

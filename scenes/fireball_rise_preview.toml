@@ -10,14 +10,14 @@ device = "auto"
 seed = 11
 
 [grid]
-resolution = [96, 96, 144]   # keep every axis divisible by 16 for the multigrid solver
-voxel_size = 40.0            # m -> 3.8 x 3.8 x 5.8 km
+resolution = [96, 96, 64]    # divisible by 16 (multigrid) and x, y by 4 (domain growth)
+voxel_size = 12.5            # m -> 1.2 x 1.2 x 0.8 km at the start, doubles as the cloud grows
 
 [output]
 dir = "out/fireball_rise_preview"
 prefix = "explosion"
 fps = 24
-fields = ["density", "temperature", "flame", "velocity"]
+fields = ["density", "dust", "temperature", "flame", "velocity"]
 preview_every = 10
 start_time = 1.0             # must not be earlier than fireball.start_time
 
@@ -54,4 +54,31 @@ cfl = 1.0
 max_dt = 0.25
 reflection = true
 vorticity_confinement = 0.15
+smagorinsky = 0.15             # subgrid turbulent mixing (0 = off)
 pressure_tolerance = 1e-4
+
+[dust]
+enabled = true
+# Three size bins: fine (stays aloft, colours the cap), medium, coarse (falls back in curtains).
+settling = [0.02, 0.4, 2.5]          # m/s terminal fall speed per bin
+optical_weight = [1.0, 0.35, 0.1]    # how much each bin darkens the volume per unit mass
+# Soil engulfed by the fireball (vaporised and pulverised at ground zero).
+fireball_loading = 0.02              # kg dust per kg air
+fireball_split = [0.5, 0.3, 0.2]
+# Skirt of dust raised along the ground by the blast wave before t = 1 s.
+skirt_radius = 700.0                 # m
+skirt_height = 120.0                 # m at ground zero
+skirt_loading = 0.01
+skirt_split = [0.4, 0.45, 0.15]
+# Sand lifted by the afterwind sucked in under the rising fireball (forms the stem).
+erosion = 0.03                       # vertical dust flux coefficient (blast-driven, very high)
+threshold_friction_velocity = 0.3    # m/s, loose desert sand
+roughness_length = 0.001             # m
+erosion_split = [0.3, 0.5, 0.2]
+mass_loading = true                  # dust weighs the air down
+render_scale = 100.0                 # exported "dust" grid = scale x optical dust concentration
+
+[domain]
+expand = true
+trigger = 0.8
+max_expansions = 4

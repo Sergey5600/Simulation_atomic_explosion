@@ -30,6 +30,8 @@ TEST_CASE("fireball scenes parse") {
         CHECK(cfg.output.schedule.start_time >= cfg.fireball.start_time);
         CHECK(cfg.grid.dims.x % 16 == 0);
         CHECK(cfg.grid.dims.z % 16 == 0);
+        CHECK(cfg.domain.expand);
+        CHECK(cfg.dust.enabled);
         CHECK(cfg.wind.points.size() == 4);
         CHECK(cfg.atmosphere.ground_altitude == doctest::Approx(1200.f));
         CHECK(cfg.solver.reflection);

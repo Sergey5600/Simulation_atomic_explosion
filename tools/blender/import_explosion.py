@@ -11,6 +11,7 @@ press "Run Script".
 Options (after the "--"):
     --dir DIR            folder with manifest.json and the .vdb files
     --density X          smoke density multiplier (default 0.2)
+    --dust X             dust density multiplier (default 0.2)
     --emission X         fireball emission multiplier (default 0.05)
     --light-power W      peak power of the fireball point light in watts (default 5e9)
     --no-light           do not create the fireball light
@@ -39,6 +40,7 @@ def parse_args():
     p = argparse.ArgumentParser(prog="import_explosion.py")
     p.add_argument("--dir", default=DEFAULT_DIR)
     p.add_argument("--density", type=float, default=0.2)
+    p.add_argument("--dust", type=float, default=0.2)
     p.add_argument("--emission", type=float, default=0.05)
     p.add_argument("--light-power", type=float, default=5e9)
     p.add_argument("--no-light", action="store_true")
@@ -128,7 +130,12 @@ def import_volume(folder, manifest):
     return obj
 
 
-def build_material(args, world_scale):
+# Fireball gas is shock-heated air full of nitrogen dioxide: the pinkish-brown of real caps.
+SMOKE_COLOR = (0.62, 0.36, 0.30, 1.0)
+DUST_COLOR = (0.78, 0.66, 0.50, 1.0)  # desert sand
+
+
+def build_material(args, world_scale, fields):
     mat = bpy.data.materials.get(MATERIAL_NAME) or bpy.data.materials.new(MATERIAL_NAME)
     nt = ensure_node_tree(mat)
     nt.nodes.clear()
@@ -161,11 +168,42 @@ def build_material(args, world_scale):
     set_input(pv, ["Color Attribute"], "")
     set_input(pv, ["Blackbody Intensity"], 0.0)
 
+    def math(op, a, b, y, label=""):
+        node = nt.nodes.new("ShaderNodeMath")
+        node.operation = op
+        node.label = label
+        node.location = (50, y)
+        for i, v in enumerate((a, b)):
+            if isinstance(v, float):
+                node.inputs[i].default_value = v
+            else:
+                nt.links.new(v, node.inputs[i])
+        return node.outputs[0]
+
     # Exported values are per metre; convert to per Blender unit.
-    dens = attribute("density", 200)
-    nt.links.new(multiply(dens.outputs["Fac"], args.density / world_scale, 200, "Density"),
-                 find_input(pv, ["Density"]))
-    set_input(pv, ["Color"], (0.42, 0.36, 0.32, 1.0))
+    dens = attribute("density", 300)
+    smoke = multiply(dens.outputs["Fac"], args.density / world_scale, 300, "Density")
+    if "dust" in fields:
+        # Smoke and sand share one volume: densities add, the colour follows the dust fraction.
+        dust_attr = attribute("dust", 100)
+        dust = multiply(dust_attr.outputs["Fac"], args.dust / world_scale, 100, "Dust")
+        total = math("ADD", smoke, dust, 250, "Total density")
+        nt.links.new(total, find_input(pv, ["Density"]))
+        frac = math("DIVIDE", dust, math("ADD", total, 1e-6, 150), 50, "Dust fraction")
+        mix = nt.nodes.new("ShaderNodeMix")
+        mix.data_type = "RGBA"
+        mix.location = (200, 150)
+
+        def by_id(sockets, identifier):
+            return next(sk for sk in sockets if sk.identifier == identifier)
+
+        nt.links.new(frac, by_id(mix.inputs, "Factor_Float"))
+        by_id(mix.inputs, "A_Color").default_value = SMOKE_COLOR
+        by_id(mix.inputs, "B_Color").default_value = DUST_COLOR
+        nt.links.new(by_id(mix.outputs, "Result_Color"), find_input(pv, ["Color"]))
+    else:
+        nt.links.new(smoke, find_input(pv, ["Density"]))
+        set_input(pv, ["Color"], SMOKE_COLOR)
     set_input(pv, ["Absorption Color"], (0.05, 0.04, 0.035, 1.0))
     set_input(pv, ["Anisotropy"], 0.3)
 
@@ -200,11 +238,15 @@ def build_light(args, manifest):
 
 
 def build_preview_scene(manifest):
-    """Camera, sun, sky and a desert ground plane framing the last frame's domain."""
+    """Camera, sun, sky and a desert ground plane framing the cloud (its largest extent)."""
     scene = bpy.context.scene
     last = manifest["frames"][-1]
     lo = last.get("domain_min", [-500.0, -500.0, 0.0])
     hi = last.get("domain_max", [500.0, 500.0, 1000.0])
+    clouds = [f for f in manifest["frames"] if "cloud_min" in f and f["cloud_max"][2] > f["cloud_min"][2]]
+    if clouds:
+        lo = [min(f["cloud_min"][a] for f in clouds) for a in range(3)]
+        hi = [max(f["cloud_max"][a] for f in clouds) for a in range(3)]
     size = max(hi[0] - lo[0], hi[2] - lo[2])
     center = ((lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.4)
 
@@ -282,7 +324,7 @@ def main():
     setup_scene_timing(manifest)
     obj = import_volume(args.dir, manifest)
     obj.data.materials.clear()
-    obj.data.materials.append(build_material(args, world_scale))
+    obj.data.materials.append(build_material(args, world_scale, manifest.get("fields", [])))
     if not args.no_light:
         build_light(args, manifest)
     if args.preview_scene or args.render_test:

@@ -50,6 +50,27 @@ struct FireballConfig {
     float flame_temperature = 6000.f;  // K at which the exported flame field is 1
 };
 
+// Dust present when the buoyant phase starts (1 s): soil engulfed by the fireball and
+// the skirt raised by the blast wave along the ground.
+struct DustInitConfig {
+    float fireball_loading = 0.02f;  // kg dust / kg air inside the fireball
+    float fireball_split[kDustBins] = {0.5f, 0.3f, 0.2f};
+    float skirt_radius = 700.f;      // m, reach of the dust raised by the shock
+    float skirt_height = 120.f;      // m at ground zero, thinning outwards
+    float skirt_loading = 0.01f;     // kg/kg near the ground
+    float skirt_split[kDustBins] = {0.4f, 0.45f, 0.15f};
+    float noise_frequency = 0.008f;  // 1/m
+};
+
+// Growing domain: when the cloud reaches `trigger` of the domain height or half-width,
+// the voxel size and the domain double (fine detail early, the whole cloud later).
+struct DomainConfig {
+    bool expand = true;
+    float trigger = 0.8f;
+    int max_expansions = 4;
+    float smoke_threshold = 0.02f;  // smoke fraction that counts as cloud
+};
+
 struct SceneConfig {
     std::string source_path;
     std::string name = "scene";
@@ -64,6 +85,9 @@ struct SceneConfig {
     FireballConfig fireball;
     RadiationParams radiation;
     SolverParams solver;
+    DustParams dust;
+    DustInitConfig dust_init;
+    DomainConfig domain;
 };
 
 SceneConfig load_scene(const std::string& path);

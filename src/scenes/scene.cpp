@@ -14,10 +14,12 @@ public:
     TestFireballScene(const SceneConfig& cfg) : cfg_(cfg) {}
 
     void advance_to(double t) override { time_ = t; }
+    GridInfo grid() const override { return cfg_.grid; }
 
     void fill_export(ExportBuffers& out) override {
         TestFireballFields f{&out.density, &out.temperature, &out.flame, &out.vel_x, &out.vel_y, &out.vel_z};
         generate_test_fireball(cfg_.test_fireball, cfg_.seed, time_, f);
+        out.dust.buffer().zero();
     }
 
 private:

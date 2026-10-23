@@ -12,6 +12,7 @@ struct PreviewInput {
     const float* density = nullptr;      // optional
     const float* temperature = nullptr;  // optional, Kelvin
     const float* flame = nullptr;        // optional, emission strength
+    const float* dust = nullptr;         // optional, optical dust concentration
 };
 
 struct PreviewOptions {

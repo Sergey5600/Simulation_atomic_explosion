@@ -47,7 +47,8 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
             for (int j = 0; j < g.dims.y; ++j)
                 for (int i = 0; i < g.dims.x; ++i) {
                     const std::int64_t idx = g.index(i, j, k);
-                    const bool visible = (in.density && in.density[idx] > 1e-3f) || (in.flame && in.flame[idx] > 1e-4f);
+                    const bool visible = (in.density && in.density[idx] > 1e-3f) || (in.flame && in.flame[idx] > 1e-4f) ||
+                                         (in.dust && in.dust[idx] > 1e-3f);
                     if (!visible) continue;
                     lo = std::min(lo, i);
                     hi = std::max(hi, i);
@@ -67,6 +68,7 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
     std::vector<float> img(std::size_t(w) * h * 3, 0.f);
 
     const Rgb smoke{0.55f, 0.50f, 0.46f};
+    const Rgb sand{0.80f, 0.68f, 0.52f};
     const Rgb ambient{0.75f, 0.85f, 1.0f};
 
 #pragma omp parallel for schedule(dynamic, 4)
@@ -77,10 +79,15 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
             Rgb L;
             for (int j = 0; j < g.dims.y && tr > 1e-3f; ++j) {
                 const std::int64_t idx = g.index(i, j, k);
-                const float d = in.density ? std::max(in.density[idx], 0.f) : 0.f;
+                const float ds = in.density ? std::max(in.density[idx], 0.f) : 0.f;
+                const float dd = in.dust ? std::max(in.dust[idx], 0.f) : 0.f;
                 const float f = in.flame ? std::max(in.flame[idx], 0.f) : 0.f;
+                const float d = ds + dd;
                 if (d <= 0.f && f <= 0.f) continue;
                 const float alpha = 1.f - std::exp(-d * opt.density_scale * g.dx);
+                const float dust_frac = d > 0.f ? dd / d : 0.f;
+                const Rgb albedo{smoke.r + (sand.r - smoke.r) * dust_frac, smoke.g + (sand.g - smoke.g) * dust_frac,
+                                 smoke.b + (sand.b - smoke.b) * dust_frac};
                 Rgb e;
                 if (f > 0.f) {
                     const Rgb bb = blackbody_rgb(in.temperature ? in.temperature[idx] : 3000.f);
@@ -88,9 +95,9 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
                     e = Rgb{bb.r * s, bb.g * s, bb.b * s};
                 }
                 // Scattered sky light (crudely constant) plus emission.
-                L.r += tr * (alpha * smoke.r * ambient.r * 0.6f + e.r);
-                L.g += tr * (alpha * smoke.g * ambient.g * 0.6f + e.g);
-                L.b += tr * (alpha * smoke.b * ambient.b * 0.6f + e.b);
+                L.r += tr * (alpha * albedo.r * ambient.r * 0.6f + e.r);
+                L.g += tr * (alpha * albedo.g * ambient.g * 0.6f + e.g);
+                L.b += tr * (alpha * albedo.b * ambient.b * 0.6f + e.b);
                 tr *= 1.f - alpha;
             }
             // Sky gradient behind the volume.

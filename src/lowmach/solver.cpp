@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 #include "core/parallel.h"
 #include "physics/constants.h"
@@ -57,18 +58,28 @@ struct Confinement {
     }
 };
 
+// Sum of the dust mixing ratios at a linear cell index.
+struct DustSum {
+    const float* bin[kDustBins];
+    int count;
+    SIM_INLINE float at(std::int64_t idx) const {
+        float s = 0.f;
+        for (int b = 0; b < count; ++b) s += bin[b][idx];
+        return s;
+    }
+};
+
 }  // namespace detail
 
 LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere& atm, const SolverParams& params,
-                             const RadiationParams& radiation)
+                             const RadiationParams& radiation, const DustParams& dust)
     : dev_(dev),
       grid_(grid),
       params_(params),
       radiation_(radiation),
+      dust_(dust),
+      atmosphere_(atm),
       ambient_(atm, grid, dev),
-      theta_(dev, std::size_t(grid.count())),
-      smoke_(dev, std::size_t(grid.count())),
-      scalar_tmp_(dev, std::size_t(grid.count())),
       rho_(dev, std::size_t(grid.count())),
       source_(dev, std::size_t(grid.count())),
       omega_x_(dev, std::size_t(grid.count())),
@@ -78,30 +89,55 @@ LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere&
       vel_a_(grid.dims, dev),
       vel_b_(grid.dims, dev),
       scratch_(grid.dims, dev),
-      pressure_(dev, grid.dims, grid.dx) {}
+      pressure_(dev, grid.dims, grid.dx) {
+    const int count = kDust0 + (dust_.enabled ? kDustBins : 0);
+    for (int i = 0; i < count; ++i) {
+        scalars_.emplace_back(dev, std::size_t(grid.count()));
+        scalars_next_.emplace_back(dev, std::size_t(grid.count()));
+        scalars_bwd_.emplace_back(dev, std::size_t(grid.count()));
+    }
+}
+
+LowMachSolver::DustPointers LowMachSolver::dust_pointers() {
+    DustPointers d;
+    if (!dust_.enabled) return d;
+    d.count = kDustBins;
+    for (int b = 0; b < kDustBins; ++b) d.bin[b] = scalars_[std::size_t(kDust0 + b)].data();
+    return d;
+}
 
 std::size_t LowMachSolver::memory_bytes() const {
-    const std::size_t cells = 8 * theta_.bytes();
+    const std::size_t cells = (3 * scalars_.size() + 5) * rho_.bytes();
     const std::size_t faces = 3 * (vel_.u.bytes() + vel_.v.bytes() + vel_.w.bytes()) + scratch_.a.bytes() + scratch_.b.bytes();
     return cells + faces + pressure_.memory_bytes();
 }
 
-void LowMachSolver::reset_to_ambient(const WindProfile& wind) {
-    const Int3 n = grid_.dims;
-    const std::size_t nz = std::size_t(n.z);
-    // Wind per level, evaluated on the host.
+namespace {
+
+// Ambient wind components per cell level of a grid, uploaded to the device.
+void upload_wind(const WindProfile& wind, const GridInfo& g, Device dev, Buffer<float>& wu_d, Buffer<float>& wv_d) {
+    const std::size_t nz = std::size_t(g.dims.z);
     std::vector<float> wu(nz), wv(nz);
     const float heading = wind.heading_deg * 3.14159265f / 180.f;
     for (std::size_t k = 0; k < nz; ++k) {
-        const float s = wind.speed_at(grid_.origin.z + (float(k) + 0.5f) * grid_.dx);
+        const float s = wind.speed_at(g.origin.z + (float(k) + 0.5f) * g.dx);
         wu[k] = s * std::cos(heading);
         wv[k] = s * std::sin(heading);
     }
-    Buffer<float> wind_u(dev_, nz), wind_v(dev_, nz);
-    wind_u.upload(wu.data(), nz);
-    wind_v.upload(wv.data(), nz);
-    const float* pu = wind_u.data();
-    const float* pv = wind_v.data();
+    wu_d.allocate(dev, nz);
+    wv_d.allocate(dev, nz);
+    wu_d.upload(wu.data(), nz);
+    wv_d.upload(wv.data(), nz);
+}
+
+}  // namespace
+
+void LowMachSolver::reset_to_ambient(const WindProfile& wind) {
+    const Int3 n = grid_.dims;
+    wind_ = wind;
+    upload_wind(wind_, grid_, dev_, wind_u_, wind_v_);
+    const float* pu = wind_u_.data();
+    const float* pv = wind_v_.data();
     const float* th_a = ambient_.theta.data();
 
     FieldView th = theta(), sm = smoke();
@@ -109,11 +145,106 @@ void LowMachSolver::reset_to_ambient(const WindProfile& wind) {
         th(i, j, k) = th_a[k];
         sm(i, j, k) = 0.f;
     });
+    for (std::size_t b = kDust0; b < scalars_.size(); ++b) scalars_[b].zero();
     FieldView u = vel_.u_view(), v = vel_.v_view(), w = vel_.w_view();
     parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) { u(i, j, k) = pu[k]; });
     parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) { v(i, j, k) = pv[k]; });
     parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) { w(i, j, k) = 0.f; });
-    device_synchronize(dev_);  // the wind buffers go out of scope
+}
+
+void LowMachSolver::coarsen_domain() {
+    const Int3 n = grid_.dims;
+    if (!can_coarsen(n)) throw std::runtime_error("coarsen_domain: grid x, y must be divisible by 4 and z by 2");
+    GridInfo ng = grid_;
+    ng.dx = 2.f * grid_.dx;
+    const float cx = grid_.origin.x + 0.5f * n.x * grid_.dx, cy = grid_.origin.y + 0.5f * n.y * grid_.dx;
+    ng.origin = Float3{cx - 0.5f * n.x * ng.dx, cy - 0.5f * n.y * ng.dx, grid_.origin.z};
+    // The old domain becomes new cells [ox, ox + n.x/2) x [oy, oy + n.y/2) x [0, n.z/2).
+    const int ox = n.x / 4, oy = n.y / 4;
+    const int hx = n.x / 2, hy = n.y / 2, hz = n.z / 2;
+
+    AtmosphereColumns new_ambient(atmosphere_, ng, dev_);
+    Buffer<float> new_wu, new_wv;
+    upload_wind(wind_, ng, dev_, new_wu, new_wv);
+
+    // Cell fields: average of the 8 old cells, ambient outside.
+    for (std::size_t s = 0; s < scalars_.size(); ++s) {
+        const FieldView src{scalars_[s].data(), n};
+        FieldView dst{scalars_next_[s].data(), n};
+        const float* amb = s == std::size_t(kTheta) ? new_ambient.theta.data() : nullptr;
+        parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+            const int a = i - ox, b = j - oy, c = k;
+            if (a >= 0 && a < hx && b >= 0 && b < hy && c < hz) {
+                float sum = 0.f;
+                for (int q = 0; q < 8; ++q) sum += src(2 * a + (q & 1), 2 * b + ((q >> 1) & 1), 2 * c + ((q >> 2) & 1));
+                dst(i, j, k) = 0.125f * sum;
+            } else {
+                dst(i, j, k) = amb ? amb[k] : 0.f;
+            }
+        });
+        std::swap(scalars_[s], scalars_next_[s]);
+    }
+
+    // Faces: average of the 4 old faces covering each new face, ambient wind outside.
+    const FieldView ou = vel_.u_view(), ov = vel_.v_view(), ow = vel_.w_view();
+    FieldView nu = vel_a_.u_view(), nv = vel_a_.v_view(), nw = vel_a_.w_view();
+    const float* pu = new_wu.data();
+    const float* pv = new_wv.data();
+    parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = i - ox, b = j - oy, c = k;
+        if (a >= 0 && a <= hx && b >= 0 && b < hy && c < hz) {
+            nu(i, j, k) = 0.25f * (ou(2 * a, 2 * b, 2 * c) + ou(2 * a, 2 * b + 1, 2 * c) + ou(2 * a, 2 * b, 2 * c + 1) +
+                                   ou(2 * a, 2 * b + 1, 2 * c + 1));
+        } else {
+            nu(i, j, k) = pu[k];
+        }
+    });
+    parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = i - ox, b = j - oy, c = k;
+        if (a >= 0 && a < hx && b >= 0 && b <= hy && c < hz) {
+            nv(i, j, k) = 0.25f * (ov(2 * a, 2 * b, 2 * c) + ov(2 * a + 1, 2 * b, 2 * c) + ov(2 * a, 2 * b, 2 * c + 1) +
+                                   ov(2 * a + 1, 2 * b, 2 * c + 1));
+        } else {
+            nv(i, j, k) = pv[k];
+        }
+    });
+    parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = i - ox, b = j - oy, c = k;
+        if (a >= 0 && a < hx && b >= 0 && b < hy && c <= hz) {
+            nw(i, j, k) = 0.25f * (ow(2 * a, 2 * b, 2 * c) + ow(2 * a + 1, 2 * b, 2 * c) + ow(2 * a, 2 * b + 1, 2 * c) +
+                                   ow(2 * a + 1, 2 * b + 1, 2 * c));
+        } else {
+            nw(i, j, k) = 0.f;
+        }
+    });
+    vel_.swap(vel_a_);
+
+    grid_ = ng;
+    ambient_ = std::move(new_ambient);
+    wind_u_ = std::move(new_wu);
+    wind_v_ = std::move(new_wv);
+    pressure_ = PressureSolver(dev_, n, ng.dx);
+
+    // The averaged velocity is not exactly divergence-free on the new grid.
+    source_.zero();
+    update_density();
+    project(vel_);
+}
+
+CloudExtent LowMachSolver::cloud_extent(float smoke_threshold) {
+    const GridInfo g = grid_;
+    FieldView sm = smoke();
+    const float cx = g.origin.x + 0.5f * g.dims.x * g.dx, cy = g.origin.y + 0.5f * g.dims.y * g.dx;
+    CloudExtent e;
+    e.top = parallel_max(dev_, g.dims, SIM_LAMBDA(int i, int j, int k) {
+        return sm(i, j, k) > smoke_threshold ? (k + 1) * g.dx : 0.f;
+    });
+    e.radius = parallel_max(dev_, g.dims, SIM_LAMBDA(int i, int j, int k) {
+        if (sm(i, j, k) <= smoke_threshold) return 0.f;
+        const Float3 p = g.cell_center(i, j, k);
+        return sqrtf((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy)) + 0.5f * g.dx;
+    });
+    return e;
 }
 
 void LowMachSolver::cool_and_build_source(float dt) {
@@ -155,8 +286,11 @@ void LowMachSolver::update_density() {
     const float* exner = ambient_.exner.data();
     const float* p_amb = ambient_.pressure.data();
     const float r_gas = phys::kGasConstantAir;
+    const DustPointers dp = dust_pointers();
+    const detail::DustSum dust{{dp.bin[0], dp.bin[1], dp.bin[2]}, dust_.mass_loading ? dp.count : 0};
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-        rho(i, j, k) = p_amb[k] / (r_gas * th(i, j, k) * exner[k]);
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        rho(i, j, k) = p_amb[k] / (r_gas * th(i, j, k) * exner[k]) * (1.f + dust.at(idx));
     });
     pressure_.set_density(rho);
 }
@@ -167,13 +301,18 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
     FieldView u = field.u_view(), v = field.v_view(), w = field.w_view();
     const float* th_a = ambient_.theta.data();
     const float g = phys::kGravity;
+    const DustPointers dp = dust_pointers();
+    const detail::DustSum dust{{dp.bin[0], dp.bin[1], dp.bin[2]}, dust_.mass_loading ? dp.count : 0};
 
-    // Buoyancy relative to the ambient column, averaged from the two cells around each z-face.
+    // Buoyancy of the gas-dust mixture relative to the ambient column, averaged from the
+    // two cells around each z-face: rho_a / rho_mix - 1 = (theta / theta_a) / (1 + dust) - 1.
     parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
         if (k == 0) return;  // ground
         const int kb = k - 1, kt = k < n.z ? k : n.z - 1;
-        const float bb = (th(i, j, kb) - th_a[kb]) / th_a[kb];
-        const float bt = (th(i, j, kt) - th_a[kt]) / th_a[kt];
+        const std::int64_t ib = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * kb);
+        const std::int64_t it = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * kt);
+        const float bb = th(i, j, kb) / th_a[kb] / (1.f + dust.at(ib)) - 1.f;
+        const float bt = th(i, j, kt) / th_a[kt] / (1.f + dust.at(it)) - 1.f;
         w(i, j, k) += dt * g * 0.5f * (bb + bt);
     });
 
@@ -203,13 +342,15 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
 }
 
 void LowMachSolver::advect_scalars(const MacView& vel, float dt) {
-    const Int3 n = grid_.dims;
-    advect_maccormack(dev_, vel, dt, grid_.dx, SampleView{theta_.data(), n, kCellOffset}, {scalar_tmp_.data(), n},
-                      scratch_);
-    std::swap(theta_, scalar_tmp_);
-    advect_maccormack(dev_, vel, dt, grid_.dx, SampleView{smoke_.data(), n, kCellOffset}, {scalar_tmp_.data(), n},
-                      scratch_);
-    std::swap(smoke_, scalar_tmp_);
+    CellFieldSet set;
+    set.count = int(scalars_.size());
+    for (std::size_t i = 0; i < scalars_.size(); ++i) {
+        set.src[i] = scalars_[i].data();
+        set.dst[i] = scalars_next_[i].data();
+        set.bwd[i] = scalars_bwd_[i].data();
+    }
+    advect_cells_maccormack(dev_, vel, dt, grid_.dx, grid_.dims, set);
+    for (std::size_t i = 0; i < scalars_.size(); ++i) std::swap(scalars_[i], scalars_next_[i]);
 }
 
 namespace detail {
@@ -287,16 +428,48 @@ void LowMachSolver::apply_turbulence(MacField& field, float dt) {
     });
 
     const float c_scalar = dt / (dx * dx * params_.turbulent_prandtl);
-    detail::diffuse_cells(dev_, theta(), {scalar_tmp_.data(), n}, nu, c_scalar);
-    std::swap(theta_, scalar_tmp_);
-    detail::diffuse_cells(dev_, smoke(), {scalar_tmp_.data(), n}, nu, c_scalar);
-    std::swap(smoke_, scalar_tmp_);
+    for (std::size_t s = 0; s < scalars_.size(); ++s) {
+        detail::diffuse_cells(dev_, {scalars_[s].data(), n}, {scalars_next_[s].data(), n}, nu, c_scalar);
+        std::swap(scalars_[s], scalars_next_[s]);
+    }
 
     const float c_mom = dt / (dx * dx);
     detail::diffuse_faces(dev_, field.u_view(), vel_b_.u_view(), nu, n, 0, c_mom);
     detail::diffuse_faces(dev_, field.v_view(), vel_b_.v_view(), nu, n, 1, c_mom);
     detail::diffuse_faces(dev_, field.w_view(), vel_b_.w_view(), nu, n, 2, c_mom);
     field.swap(vel_b_);
+}
+
+// Settling (first-order upwind, falling dust leaves through the ground) and lifting of
+// loose sand by strong near-surface wind into the lowest cells.
+void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
+    if (!dust_.enabled) return;
+    const Int3 n = grid_.dims;
+    const float dx = grid_.dx;
+    const float kappa = 0.4f;  // von Karman
+    // Friction velocity from the wind in the lowest cell (log law): u* = kappa U / ln(z / z0).
+    const float ustar_per_u = kappa / std::log(std::max(0.5f * dx / dust_.roughness_length, 1.01f));
+    const float ut = dust_.threshold_friction_velocity;
+    const float lift_rate = dust_.erosion * dt / dx;  // dY = C u* (u*^2 - u*t^2) dt / dx
+    const FieldView u = const_cast<MacField&>(field).u_view(), v = const_cast<MacField&>(field).v_view();
+
+    for (int b = 0; b < kDustBins; ++b) {
+        FieldView src = dust(b), dst{scalars_next_[std::size_t(kDust0 + b)].data(), n};
+        const float c = dust_.settling[b] * dt / dx;  // Courant number of the fall
+        const float split = dust_.erosion_split[b];
+        parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+            const float above = k + 1 < n.z ? src(i, j, k + 1) : 0.f;  // clean air enters from the top
+            float y = src(i, j, k) + fminf(c, 1.f) * (above - src(i, j, k));
+            if (k == 0 && lift_rate > 0.f) {
+                const float uc = 0.5f * (u(i, j, 0) + u(i + 1, j, 0));
+                const float vc = 0.5f * (v(i, j, 0) + v(i, j + 1, 0));
+                const float us = ustar_per_u * sqrtf(uc * uc + vc * vc);
+                if (us > ut) y += split * lift_rate * us * (us * us - ut * ut);
+            }
+            dst(i, j, k) = fminf(y, 0.5f);
+        });
+        std::swap(scalars_[std::size_t(kDust0 + b)], scalars_next_[std::size_t(kDust0 + b)]);
+    }
 }
 
 ProjectionStats LowMachSolver::project(MacField& field) {
@@ -338,6 +511,7 @@ StepStats LowMachSolver::step(double dt_d) {
         advect_velocity(dev_, mid, h, grid_.dx, vel_b_, vel_, scratch_);
         advect_scalars(mid, dt);
         apply_turbulence(vel_, dt);
+        settle_and_lift_dust(vel_, dt);
         update_density();
         add_forces(vel_, h);
         record(project(vel_));
@@ -345,6 +519,7 @@ StepStats LowMachSolver::step(double dt_d) {
         advect_scalars(vel_.sampler(), dt);
         advect_velocity(dev_, vel_.sampler(), dt, grid_.dx, vel_, vel_a_, scratch_);
         apply_turbulence(vel_a_, dt);
+        settle_and_lift_dust(vel_a_, dt);
         update_density();
         add_forces(vel_a_, dt);
         record(project(vel_a_));
@@ -384,6 +559,19 @@ CloudDiagnostics LowMachSolver::diagnostics() {
     d.max_speed_z = parallel_max(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         return length(cv.at(i, j, k)) >= threshold ? g.origin.z + (k + 0.5f) * g.dx : 0.f;
     });
+    if (dust_.enabled) {
+        const DustPointers dp = dust_pointers();
+        const detail::DustSum dust{{dp.bin[0], dp.bin[1], dp.bin[2]}, dp.count};
+        FieldView th = theta();
+        const float* exner = ambient_.exner.data();
+        const float* p_amb = ambient_.pressure.data();
+        const float r_gas = phys::kGasConstantAir;
+        const double cell_volume = double(g.dx) * g.dx * g.dx;
+        d.dust_tonnes = 1e-3 * cell_volume * parallel_sum(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+            const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+            return double(dust.at(idx)) * p_amb[k] / (r_gas * th(i, j, k) * exner[k]);
+        });
+    }
     return d;
 }
 
@@ -401,8 +589,8 @@ double LowMachSolver::suggest_dt() {
     return dt;
 }
 
-void LowMachSolver::fill_export(FieldView density, FieldView temperature, FieldView flame, FieldView vel_x,
-                                FieldView vel_y, FieldView vel_z, float flame_temperature) {
+void LowMachSolver::fill_export(FieldView density, FieldView dust_out, FieldView temperature, FieldView flame,
+                                FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature) {
     const Int3 n = grid_.dims;
     FieldView th = theta(), sm = smoke();
     const float* exner = ambient_.exner.data();
@@ -412,15 +600,26 @@ void LowMachSolver::fill_export(FieldView density, FieldView temperature, FieldV
     const float r_gas = phys::kGasConstantAir;
     const float inv_tf = 1.f / flame_temperature;
     const detail::CellVelocity cv{vel_.u_view(), vel_.v_view(), vel_.w_view(), n};
+    const DustPointers dp = dust_pointers();
+    float wgt[kDustBins];
+    for (int b = 0; b < kDustBins; ++b) wgt[b] = dust_.optical_weight[b] * dust_.render_scale;
+    const float w0 = wgt[0], w1 = wgt[1], w2 = wgt[2];
+    const float* d0 = dp.bin[0];
+    const float* d1 = dp.bin[1];
+    const float* d2 = dp.bin[2];
+    const bool has_dust = dp.count > 0;
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
         const float t = th(i, j, k) * exner[k];
         const float ta = t_amb[k];
         const float s = sm(i, j, k);
         const float rho = p_amb[k] / (r_gas * t);
+        const float optical_dust = has_dust ? (w0 * d0[idx] + w1 * d1[idx] + w2 * d2[idx]) * rho / rho_ground : 0.f;
         const bool hot = t > ta + 1.f;
-        const bool active = hot || s > 1e-4f;
+        const bool active = hot || s > 1e-4f || optical_dust > 1e-4f;
         density(i, j, k) = s * rho / rho_ground;
+        dust_out(i, j, k) = optical_dust;
         temperature(i, j, k) = active ? t : 0.f;
         const float x = t * inv_tf, xa = ta * inv_tf;
         flame(i, j, k) = hot ? fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f) : 0.f;

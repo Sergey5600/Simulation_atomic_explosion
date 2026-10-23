@@ -159,6 +159,40 @@ void parse_radiation(const toml::table& t, RadiationParams& c) {
     c.exponent = float(get_or<double>(t, "exponent", c.exponent));
 }
 
+void bins(const toml::table& t, const char* key, float (&out)[kDustBins]) {
+    if (!t.contains(key)) return;
+    const auto v = number_array(t, key, kDustBins);
+    for (int b = 0; b < kDustBins; ++b) out[b] = float(v[std::size_t(b)]);
+}
+
+void parse_dust(const toml::table& t, DustParams& d, DustInitConfig& init) {
+    d.enabled = get_or<bool>(t, "enabled", d.enabled);
+    bins(t, "settling", d.settling);
+    bins(t, "optical_weight", d.optical_weight);
+    d.erosion = float(get_or<double>(t, "erosion", d.erosion));
+    d.threshold_friction_velocity = float(get_or<double>(t, "threshold_friction_velocity", d.threshold_friction_velocity));
+    d.roughness_length = float(get_or<double>(t, "roughness_length", d.roughness_length));
+    bins(t, "erosion_split", d.erosion_split);
+    d.mass_loading = get_or<bool>(t, "mass_loading", d.mass_loading);
+    d.render_scale = float(get_or<double>(t, "render_scale", d.render_scale));
+    init.fireball_loading = float(get_or<double>(t, "fireball_loading", init.fireball_loading));
+    bins(t, "fireball_split", init.fireball_split);
+    init.skirt_radius = float(get_or<double>(t, "skirt_radius", init.skirt_radius));
+    init.skirt_height = float(get_or<double>(t, "skirt_height", init.skirt_height));
+    init.skirt_loading = float(get_or<double>(t, "skirt_loading", init.skirt_loading));
+    bins(t, "skirt_split", init.skirt_split);
+    init.noise_frequency = float(get_or<double>(t, "noise_frequency", init.noise_frequency));
+    if (d.roughness_length <= 0.f) fail("dust.roughness_length must be > 0");
+}
+
+void parse_domain(const toml::table& t, DomainConfig& d) {
+    d.expand = get_or<bool>(t, "expand", d.expand);
+    d.trigger = float(get_or<double>(t, "trigger", d.trigger));
+    d.max_expansions = int(get_or<std::int64_t>(t, "max_expansions", d.max_expansions));
+    d.smoke_threshold = float(get_or<double>(t, "smoke_threshold", d.smoke_threshold));
+    if (d.trigger <= 0.f || d.trigger > 1.f) fail("domain.trigger must be in (0, 1]");
+}
+
 void parse_solver(const toml::table& t, SolverParams& c) {
     c.cfl = float(get_or<double>(t, "cfl", c.cfl));
     c.max_dt = float(get_or<double>(t, "max_dt", c.max_dt));
@@ -205,6 +239,8 @@ SceneConfig load_scene(const std::string& path) {
     if (const auto* t = subtable(root, "fireball")) parse_fireball(*t, cfg.fireball);
     if (const auto* t = subtable(root, "radiation")) parse_radiation(*t, cfg.radiation);
     if (const auto* t = subtable(root, "solver")) parse_solver(*t, cfg.solver);
+    if (const auto* t = subtable(root, "dust")) parse_dust(*t, cfg.dust, cfg.dust_init);
+    if (const auto* t = subtable(root, "domain")) parse_domain(*t, cfg.domain);
     return cfg;
 }
 

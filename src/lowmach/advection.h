@@ -19,6 +19,17 @@ struct AdvectionScratch {
 void advect_maccormack(Device dev, const MacView& vel, float dt, float dx, const SampleView& src, FieldView dst,
                        AdvectionScratch& scratch);
 
+// Several cell-centred fields advected together: the characteristic is traced once per
+// cell and pass instead of once per field. bwd[f] is per-field scratch.
+constexpr int kMaxAdvectFields = 8;
+struct CellFieldSet {
+    int count = 0;
+    const float* src[kMaxAdvectFields] = {};
+    float* dst[kMaxAdvectFields] = {};
+    float* bwd[kMaxAdvectFields] = {};
+};
+void advect_cells_maccormack(Device dev, const MacView& vel, float dt, float dx, Int3 n, const CellFieldSet& fields);
+
 // Advects the three components of `field` by `vel` into `out`.
 void advect_velocity(Device dev, const MacView& vel, float dt, float dx, const MacField& field, MacField& out,
                      AdvectionScratch& scratch);

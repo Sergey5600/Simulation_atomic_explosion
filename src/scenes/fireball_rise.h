@@ -9,6 +9,9 @@ namespace sim {
 // Writes the initial fireball into the solver state (on top of the ambient atmosphere).
 void init_fireball(LowMachSolver& solver, const FireballConfig& cfg, std::uint32_t seed);
 
+// Adds the dust present at the start: soil inside the fireball and the skirt raised by the shock.
+void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const DustInitConfig& cfg, std::uint32_t seed);
+
 std::unique_ptr<Scene> make_fireball_rise_scene(const SceneConfig& cfg, Device dev);
 
 }  // namespace sim

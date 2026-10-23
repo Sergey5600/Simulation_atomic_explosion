@@ -1,5 +1,7 @@
 #include "lowmach/advection.h"
 
+#include <stdexcept>
+
 #include "core/parallel.h"
 
 namespace sim {
@@ -31,6 +33,34 @@ void advect_maccormack(Device dev, const MacView& vel, float dt, float dx, const
         float lo, hi;
         src.minmax(vel.trace(g, s), lo, hi);
         dst(i, j, k) = (corrected < lo || corrected > hi) ? f : corrected;
+    });
+}
+
+void advect_cells_maccormack(Device dev, const MacView& vel, float dt, float dx, Int3 n, const CellFieldSet& fields) {
+    if (fields.count <= 0 || fields.count > kMaxAdvectFields) throw std::invalid_argument("advect_cells: bad field count");
+    const float s = dt / dx;
+    const CellFieldSet f = fields;
+
+    parallel_for(dev, n, SIM_LAMBDA(int i, int j, int k) {
+        const Float3 p = vel.trace(make_f3(i + 0.5f, j + 0.5f, k + 0.5f), s);
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        for (int c = 0; c < f.count; ++c) f.dst[c][idx] = SampleView{f.src[c], n, make_f3(0.5f, 0.5f, 0.5f)}.sample(p);
+    });
+    parallel_for(dev, n, SIM_LAMBDA(int i, int j, int k) {
+        const Float3 p = vel.trace(make_f3(i + 0.5f, j + 0.5f, k + 0.5f), -s);
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        for (int c = 0; c < f.count; ++c) f.bwd[c][idx] = SampleView{f.dst[c], n, make_f3(0.5f, 0.5f, 0.5f)}.sample(p);
+    });
+    parallel_for(dev, n, SIM_LAMBDA(int i, int j, int k) {
+        const Float3 p = vel.trace(make_f3(i + 0.5f, j + 0.5f, k + 0.5f), s);
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        for (int c = 0; c < f.count; ++c) {
+            const float fw = f.dst[c][idx];
+            const float corrected = fw + 0.5f * (f.src[c][idx] - f.bwd[c][idx]);
+            float lo, hi;
+            SampleView{f.src[c], n, make_f3(0.5f, 0.5f, 0.5f)}.minmax(p, lo, hi);
+            f.dst[c][idx] = (corrected < lo || corrected > hi) ? fw : corrected;
+        }
     });
 }
 
