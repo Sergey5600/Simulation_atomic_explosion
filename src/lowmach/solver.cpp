@@ -212,6 +212,93 @@ void LowMachSolver::advect_scalars(const MacView& vel, float dt) {
     std::swap(smoke_, scalar_tmp_);
 }
 
+namespace detail {
+
+SIM_INLINE float clamped(FieldView f, int i, int j, int k) {
+    i = i < 0 ? 0 : (i >= f.dims.x ? f.dims.x - 1 : i);
+    j = j < 0 ? 0 : (j >= f.dims.y ? f.dims.y - 1 : j);
+    k = k < 0 ? 0 : (k >= f.dims.z ? f.dims.z - 1 : k);
+    return f(i, j, k);
+}
+
+// dst = src + c * div(nu grad src) for a cell field, zero flux through every boundary.
+void diffuse_cells(Device dev, FieldView src, FieldView dst, FieldView nu, float c) {
+    const Int3 n = src.dims;
+    parallel_for(dev, n, SIM_LAMBDA(int i, int j, int k) {
+        const float v = src(i, j, k), nc = nu(i, j, k);
+        float flux = 0.f;
+        if (i > 0) flux += 0.5f * (nc + nu(i - 1, j, k)) * (src(i - 1, j, k) - v);
+        if (i < n.x - 1) flux += 0.5f * (nc + nu(i + 1, j, k)) * (src(i + 1, j, k) - v);
+        if (j > 0) flux += 0.5f * (nc + nu(i, j - 1, k)) * (src(i, j - 1, k) - v);
+        if (j < n.y - 1) flux += 0.5f * (nc + nu(i, j + 1, k)) * (src(i, j + 1, k) - v);
+        if (k > 0) flux += 0.5f * (nc + nu(i, j, k - 1)) * (src(i, j, k - 1) - v);
+        if (k < n.z - 1) flux += 0.5f * (nc + nu(i, j, k + 1)) * (src(i, j, k + 1) - v);
+        dst(i, j, k) = v + c * flux;
+    });
+}
+
+// dst = src + c * nu_face * laplacian(src) for one staggered velocity component
+// (axis 0, 1, 2 = u, v, w); nu is cell centred, n the cell counts.
+void diffuse_faces(Device dev, FieldView src, FieldView dst, FieldView nu, Int3 n, int axis, float c) {
+    parallel_for(dev, src.dims, SIM_LAMBDA(int i, int j, int k) {
+        if (axis == 2 && k == 0) {  // the ground stays impermeable
+            dst(i, j, k) = 0.f;
+            return;
+        }
+        const int ia = axis == 0 ? (i > 0 ? i - 1 : 0) : i;
+        const int ja = axis == 1 ? (j > 0 ? j - 1 : 0) : j;
+        const int ka = axis == 2 ? (k > 0 ? k - 1 : 0) : k;
+        const int ib = axis == 0 ? (i < n.x ? i : n.x - 1) : i;
+        const int jb = axis == 1 ? (j < n.y ? j : n.y - 1) : j;
+        const int kb = axis == 2 ? (k < n.z ? k : n.z - 1) : k;
+        const float nf = 0.5f * (nu(ia, ja, ka) + nu(ib, jb, kb));
+        const float v = src(i, j, k);
+        const float lap = clamped(src, i - 1, j, k) + clamped(src, i + 1, j, k) + clamped(src, i, j - 1, k) +
+                          clamped(src, i, j + 1, k) + clamped(src, i, j, k - 1) + clamped(src, i, j, k + 1) - 6.f * v;
+        dst(i, j, k) = v + c * nf * lap;
+    });
+}
+
+}  // namespace detail
+
+// Smagorinsky eddy viscosity nu = (C_s dx)^2 |S|, applied as explicit diffusion to the
+// velocity, theta and smoke. It stands in for the turbulent mixing of hot cloud gas with
+// entrained air that the grid cannot resolve.
+void LowMachSolver::apply_turbulence(MacField& field, float dt) {
+    if (params_.smagorinsky <= 0.f) return;
+    const Int3 n = grid_.dims;
+    const float dx = grid_.dx;
+    const float inv_2dx = 0.5f / dx;
+    const float cs_dx2 = (params_.smagorinsky * dx) * (params_.smagorinsky * dx);
+    const float nu_max = 0.9f * dx * dx / (6.f * dt);  // explicit stability limit
+    const detail::CellVelocity cv{field.u_view(), field.v_view(), field.w_view(), n};
+    FieldView nu{omega_x_.data(), n};  // the vorticity scratch is free outside add_forces
+
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const Float3 dxp = cv.at(i + 1, j, k), dxm = cv.at(i - 1, j, k);
+        const Float3 dyp = cv.at(i, j + 1, k), dym = cv.at(i, j - 1, k);
+        const Float3 dzp = cv.at(i, j, k + 1), dzm = cv.at(i, j, k - 1);
+        const float uxx = (dxp.x - dxm.x) * inv_2dx, uyy = (dyp.y - dym.y) * inv_2dx, uzz = (dzp.z - dzm.z) * inv_2dx;
+        const float sxy = 0.5f * ((dyp.x - dym.x) + (dxp.y - dxm.y)) * inv_2dx;
+        const float sxz = 0.5f * ((dzp.x - dzm.x) + (dxp.z - dxm.z)) * inv_2dx;
+        const float syz = 0.5f * ((dzp.y - dzm.y) + (dyp.z - dym.z)) * inv_2dx;
+        const float s2 = uxx * uxx + uyy * uyy + uzz * uzz + 2.f * (sxy * sxy + sxz * sxz + syz * syz);
+        nu(i, j, k) = fminf(cs_dx2 * sqrtf(2.f * s2), nu_max);
+    });
+
+    const float c_scalar = dt / (dx * dx * params_.turbulent_prandtl);
+    detail::diffuse_cells(dev_, theta(), {scalar_tmp_.data(), n}, nu, c_scalar);
+    std::swap(theta_, scalar_tmp_);
+    detail::diffuse_cells(dev_, smoke(), {scalar_tmp_.data(), n}, nu, c_scalar);
+    std::swap(smoke_, scalar_tmp_);
+
+    const float c_mom = dt / (dx * dx);
+    detail::diffuse_faces(dev_, field.u_view(), vel_b_.u_view(), nu, n, 0, c_mom);
+    detail::diffuse_faces(dev_, field.v_view(), vel_b_.v_view(), nu, n, 1, c_mom);
+    detail::diffuse_faces(dev_, field.w_view(), vel_b_.w_view(), nu, n, 2, c_mom);
+    field.swap(vel_b_);
+}
+
 ProjectionStats LowMachSolver::project(MacField& field) {
     return pressure_.project(field, FieldView{source_.data(), grid_.dims}, params_.pressure_tolerance,
                              params_.pressure_max_iterations);
@@ -250,12 +337,14 @@ StepStats LowMachSolver::step(double dt_d) {
         const MacView mid = vel_a_.sampler();
         advect_velocity(dev_, mid, h, grid_.dx, vel_b_, vel_, scratch_);
         advect_scalars(mid, dt);
+        apply_turbulence(vel_, dt);
         update_density();
         add_forces(vel_, h);
         record(project(vel_));
     } else {
         advect_scalars(vel_.sampler(), dt);
         advect_velocity(dev_, vel_.sampler(), dt, grid_.dx, vel_, vel_a_, scratch_);
+        apply_turbulence(vel_a_, dt);
         update_density();
         add_forces(vel_a_, dt);
         record(project(vel_a_));

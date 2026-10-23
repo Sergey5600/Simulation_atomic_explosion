@@ -246,15 +246,21 @@ TEST_CASE("wind profile is carried without decay") {
 }
 
 TEST_CASE("hot fireball rises and cools") {
-    for (bool reflection : {true, false}) {
-        CAPTURE(reflection);
+    struct Variant {
+        bool reflection;
+        float smagorinsky;
+    };
+    for (const Variant var : {Variant{true, 0.f}, Variant{false, 0.f}, Variant{true, 0.17f}}) {
+        CAPTURE(var.reflection);
+        CAPTURE(var.smagorinsky);
         GridInfo g;
         g.dims = Int3{24, 24, 48};
         g.dx = 25.f;
         g.origin = Float3{-300.f, -300.f, 0.f};
         const Atmosphere atm{AtmosphereConfig{}};
         SolverParams params;
-        params.reflection = reflection;
+        params.reflection = var.reflection;
+        params.smagorinsky = var.smagorinsky;
         LowMachSolver solver(test_device(), g, atm, params, RadiationParams{});
         solver.reset_to_ambient(WindProfile{});
         FireballConfig fb;

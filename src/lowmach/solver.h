@@ -34,6 +34,8 @@ struct SolverParams {
     float max_dt = 0.1f;               // s
     bool reflection = true;            // advection-reflection (Zehnder et al. 2018): keeps vortices alive
     float vorticity_confinement = 0.15f;
+    float smagorinsky = 0.f;           // subgrid turbulence constant C_s (0 = off, typical 0.1-0.2)
+    float turbulent_prandtl = 0.7f;    // momentum / heat eddy diffusivity ratio
     float pressure_tolerance = 1e-4f;  // relative residual
     int pressure_max_iterations = 200;
 };
@@ -87,6 +89,7 @@ public:
     void update_density();
     void add_forces(MacField& field, float dt);
     void advect_scalars(const MacView& vel, float dt);
+    void apply_turbulence(MacField& field, float dt);
     ProjectionStats project(MacField& field);
 
 private:

@@ -164,6 +164,8 @@ void parse_solver(const toml::table& t, SolverParams& c) {
     c.max_dt = float(get_or<double>(t, "max_dt", c.max_dt));
     c.reflection = get_or<bool>(t, "reflection", c.reflection);
     c.vorticity_confinement = float(get_or<double>(t, "vorticity_confinement", c.vorticity_confinement));
+    c.smagorinsky = float(get_or<double>(t, "smagorinsky", c.smagorinsky));
+    c.turbulent_prandtl = float(get_or<double>(t, "turbulent_prandtl", c.turbulent_prandtl));
     c.pressure_tolerance = float(get_or<double>(t, "pressure_tolerance", c.pressure_tolerance));
     c.pressure_max_iterations = int(get_or<std::int64_t>(t, "pressure_max_iterations", c.pressure_max_iterations));
     if (c.cfl <= 0.f || c.max_dt <= 0.f) fail("solver: cfl and max_dt must be > 0");
