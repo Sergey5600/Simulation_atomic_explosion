@@ -1,0 +1,122 @@
+# Maximum quality for a 12 GB GPU: the same explosion as surface_burst_20kt.toml on a
+# 464 x 464 x 336 grid with 3.5 m voxels (3x the cells), plus slices for before/after checks.
+#
+#   .\build\windows-ninja\nukesim.exe scenes\surface_burst_20kt_ultra.toml
+#
+# Expect roughly 1.8x the run time of surface_burst_20kt_max.toml and 150-200 GB of .vdb.
+#
+# Stage A (compressible, first second): blast wave, ground reflection, the fireball
+# growing and cooling, the dust skirt kicked up by the blast wind. Stage B (low-Mach):
+# the rising mushroom cloud with its dust stem; the domain grows 5 -> 10 -> 20 -> 40 m.
+# Video: 10 s of slow motion easing from ~170x into real time, then real time.
+# GPU memory: about 9.5 GB - close Blender, browsers and games while it runs.
+
+[scene]
+name = "surface_burst_20kt_ultra"
+type = "surface_burst"
+device = "auto"
+seed = 11
+
+[grid]
+resolution = [464, 464, 336]   # divisible by 16 (multigrid) and x, y by 8 (domain growth, rest grid)
+voxel_size = 3.5               # m -> 1.62 x 1.62 x 1.18 km at the start
+
+[output]
+dir = "out/surface_burst_20kt_ultra"
+prefix = "explosion"
+prune_tolerance = 5e-4         # drop near-empty voxels: saves disk
+fps = 24
+fields = ["density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "rest"]
+preview_every = 12
+slices_every = 24             # density/vorticity slices in slices\ for before/after comparisons
+start_time = 0.0005            # s; must not be earlier than blast.start_time
+
+# Slow motion: sim seconds per video frame grow from 0.5 ms to real time (1/24 s)
+# over the first 10 s of video, which covers about the first 2 s of the explosion...
+[[output.schedule]]
+mode = "ramp"
+frames = 240
+dt_start = 0.0005
+dt_end = 0.0416667
+
+# ... then 20 s of real time.
+[[output.schedule]]
+mode = "constant"
+frames = 480
+dt = 0.0416667
+
+[atmosphere]
+ground_altitude = 1200.0       # m above sea level
+ground_temperature = 303.0     # K (30 C, desert)
+
+[wind]
+heading = 30.0                 # degrees from +X towards +Y (the direction it blows to)
+profile = [[0.0, 1.5], [10.0, 2.0], [3000.0, 6.0], [10000.0, 8.0]]   # [height m, speed m/s]
+
+[blast]
+start_time = 0.0005            # s
+yield_kt = 20.0
+hydro_fraction = 0.55          # share of the yield driving the blast
+deposit_radius = 30.0          # m, hot hemisphere the energy starts in
+noise_amplitude = 0.08         # seeds the fireball surface instabilities
+noise_frequency = 0.08         # 1/m
+handoff_time = 1.0             # s, switch to the buoyant-phase solver
+radiation_temperature_cap = 8000.0   # K, hottest apparent fireball surface
+radiation_length = 150.0       # m, about the fireball radius
+fireball_temperature = 2000.0  # K, air hotter than this becomes fireball gas
+fireball_dust_loading = 0.02   # kg soil per kg air in the initial hemisphere
+erosion = 3e-4                 # dust lifted by the blast wind
+
+[fireball]
+flame_temperature = 6000.0     # K at which the exported flame field is 1
+
+[radiation]
+absorption = 3e-4              # 1/m at reference_temperature
+reference_temperature = 3000.0
+exponent = 2.0
+
+[solver]
+cfl = 1.0
+max_dt = 0.1
+reflection = true
+vorticity_confinement = 0.15
+smagorinsky = 0.15             # subgrid turbulent mixing (0 = off)
+pressure_tolerance = 1e-4
+
+[dust]
+enabled = true
+# Three size bins: fine (stays aloft, colours the cap), medium, coarse (falls back in curtains).
+settling = [0.02, 0.4, 2.5]          # m/s terminal fall speed per bin
+optical_weight = [1.0, 0.35, 0.1]    # how much each bin darkens the volume per unit mass
+# Soil engulfed by the fireball (vaporised and pulverised at ground zero).
+fireball_loading = 0.0                # set in [blast] instead
+fireball_split = [0.5, 0.3, 0.2]
+# Skirt of dust raised along the ground by the blast wave before t = 1 s.
+skirt_radius = 700.0                 # m
+skirt_height = 120.0                 # m at ground zero
+skirt_loading = 0.0                  # the blast raises the skirt itself in this scene
+skirt_split = [0.4, 0.45, 0.15]
+# Sand lifted by the afterwind sucked in under the rising fireball (forms the stem).
+erosion = 0.03                       # vertical dust flux coefficient (blast-driven, very high)
+threshold_friction_velocity = 0.3    # m/s, loose desert sand
+roughness_length = 0.001             # m
+erosion_split = [0.3, 0.5, 0.2]
+mass_loading = true                  # dust weighs the air down
+render_scale = 100.0                 # exported "dust" grid = scale x optical dust concentration
+
+[domain]
+expand = true                  # double voxel size and domain when the cloud nears the edge
+trigger = 0.8                  # fraction of the domain height / half-width
+max_expansions = 4
+
+[humidity]
+enabled = true
+# Relative humidity by height above the ground. Dry desert air at the ground (so no Wilson
+# cloud), and a moist layer at 2.5-5 km that the rising cap pushes up into a white
+# condensation cap and rings. For a dramatic Wilson cloud around the fireball set the
+# lowest values to about 0.9 (physically unusual over a desert, but it looks great).
+profile = [[0.0, 0.2], [1500.0, 0.3], [2500.0, 0.75], [3500.0, 0.95], [5000.0, 0.9], [6500.0, 0.4], [10000.0, 0.3]]
+render_scale = 1000.0          # exported "condensate" = scale x cloud water concentration
+
+[detail]
+growth_ratio = 1.25           # frequent resets: no stretched streaks in the stem
