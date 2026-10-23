@@ -2,10 +2,12 @@
 // Scene "fireball_rise": the buoyant phase of a surface burst, from a hot
 // fireball at ambient pressure to the rising mushroom cloud (M1).
 
+#include <memory>
 #include <string>
 
 #include "lowmach/solver.h"
 #include "scenes/scene.h"
+#include "upres/rest_fields.h"
 
 namespace sim {
 
@@ -19,7 +21,9 @@ void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const Dust
 // as the cloud grows. Shared by the fireball_rise and surface_burst scenes.
 class RisePhase {
 public:
-    RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm);
+    // `rest`: rest fields carried over from an earlier stage; without them the phase makes its
+    // own (when the scene exports them) and resets them at set_time.
+    RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm, std::unique_ptr<RestFields> rest = {});
 
     void advance_to(double t);
     void export_field(ExportField f, float* host);
@@ -28,8 +32,9 @@ public:
     LowMachSolver& solver() { return solver_; }
     GridInfo grid() const { return solver_.grid(); }
     double time() const { return time_; }
-    void set_time(double t) { time_ = t; }
-    std::size_t memory_bytes() const { return solver_.memory_bytes(); }
+    void set_time(double t);
+    std::size_t memory_bytes() const { return solver_.memory_bytes() + (rest_ ? rest_->memory_bytes() : 0); }
+    const RestFields* rest_fields() const { return rest_.get(); }
     std::string profile_report() { return solver_.profiler().report_and_reset(); }
 
 private:
@@ -37,6 +42,8 @@ private:
 
     SceneConfig cfg_;
     LowMachSolver solver_;
+    std::unique_ptr<RestFields> rest_;
+    bool fresh_rest_ = false;  // made here: reset at set_time
     double time_ = 0.0;
     int expansions_ = 0, steps_since_check_ = 0;
     int steps_ = 0, iterations_ = 0, projections_ = 0;

@@ -76,6 +76,10 @@ public:
     };
     HandoffState handoff_state();
 
+    // Cell velocities written into the second RK set (free between steps), as a sampler in
+    // grid units (e.g. for carrying the rest fields). Valid until the next step.
+    MacView cell_velocity();
+
     float max_temperature();
     float max_speed();
     float max_pressure_ratio();  // max p / p_ambient, shows the shock strength

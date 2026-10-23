@@ -23,6 +23,8 @@ struct ManifestFrame {
     double light_power = 0.0;  // relative radiated power (arbitrary units)
     std::size_t active_voxels = 0;
     std::size_t file_bytes = 0;
+    float rest_weight = -1.f;    // cross-fade weight of grid rest_a (rest_b gets 1 - w); < 0 without rest grids
+    float vorticity_ref = 0.f;   // 1/s, RMS vorticity of the visible volume (normalises the detail amount)
 };
 
 struct Manifest {

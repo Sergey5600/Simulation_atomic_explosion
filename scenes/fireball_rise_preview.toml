@@ -17,7 +17,7 @@ voxel_size = 12.5            # m -> 1.2 x 1.2 x 0.8 km at the start, doubles as 
 dir = "out/fireball_rise_preview"
 prefix = "explosion"
 fps = 24
-fields = ["density", "dust", "condensate", "temperature", "flame", "velocity"]
+fields = ["density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "rest"]
 preview_every = 10
 start_time = 1.0             # must not be earlier than fireball.start_time
 

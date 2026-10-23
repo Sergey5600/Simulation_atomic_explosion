@@ -9,6 +9,7 @@
 #include "compressible/euler.h"
 #include "core/schedule.h"
 #include "lowmach/solver.h"
+#include "upres/rest_fields.h"
 #include "physics/atmosphere.h"
 #include "physics/wind.h"
 
@@ -92,6 +93,7 @@ struct SceneConfig {
     DomainConfig domain;
     BlastParams blast;
     HumidityProfile humidity;
+    RestParams detail;     // rest fields for render-time detail, computed when output.fields has "rest"
     bool profile = false;  // per-stage step timing in the log (set from the command line)
 };
 

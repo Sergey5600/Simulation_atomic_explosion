@@ -2,8 +2,10 @@
 
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/Dense.h>
+#include <openvdb/tools/Morphology.h>
 #include <openvdb/tree/LeafManager.h>
 
+#include <cmath>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
@@ -59,22 +61,42 @@ VdbWriteStats write_vdb(const std::string& path, const VdbFrame& frame, const Vd
 
     for (const VdbVectorInput& in : frame.vectors) {
         if (!in.x || !in.y || !in.z) throw std::invalid_argument("write_vdb: null data for grid " + in.name);
+        const GridInfo& vg = in.grid ? *in.grid : g;
         openvdb::Vec3SGrid::Ptr grid = openvdb::Vec3SGrid::create(openvdb::Vec3s(0.f));
-        grid->tree().topologyUnion(active->tree());
+        if (in.grid) {
+            // Voxels of the own grid that cover active voxels of the frame grid, plus a margin so
+            // interpolation near the edge of the volume does not fall back to the zero background.
+            auto acc = grid->getAccessor();
+            const float inv = 1.f / vg.dx;
+            for (auto it = active->cbeginValueOn(); it; ++it) {
+                const openvdb::Coord c = it.getCoord();
+                const Float3 p = g.cell_center(c.x(), c.y(), c.z());
+                const int i = int(std::floor((p.x - vg.origin.x) * inv));
+                const int j = int(std::floor((p.y - vg.origin.y) * inv));
+                const int k = int(std::floor((p.z - vg.origin.z) * inv));
+                if (i >= 0 && j >= 0 && k >= 0 && i < vg.dims.x && j < vg.dims.y && k < vg.dims.z) {
+                    acc.setValueOn(openvdb::Coord(i, j, k));
+                }
+            }
+            openvdb::tools::dilateActiveValues(grid->tree(), 1, openvdb::tools::NN_FACE_EDGE_VERTEX);
+            grid->tree().clip(dense_bbox(vg));  // dilation may step outside the grid
+        } else {
+            grid->tree().topologyUnion(active->tree());
+        }
         grid->tree().voxelizeActiveTiles();
         openvdb::tree::LeafManager<openvdb::Vec3STree> leaves(grid->tree());
         const float s = in.scale;
         leaves.foreach([&](openvdb::Vec3STree::LeafNodeType& leaf, std::size_t) {
             for (auto it = leaf.beginValueOn(); it; ++it) {
                 const openvdb::Coord c = it.getCoord();
-                const std::int64_t idx = g.index(c.x(), c.y(), c.z());
+                const std::int64_t idx = vg.index(c.x(), c.y(), c.z());
                 it.setValue(openvdb::Vec3s(in.x[idx] * s, in.y[idx] * s, in.z[idx] * s));
             }
         });
         grid->setName(in.name);
-        grid->setTransform(xform->copy());
-        grid->setVectorType(openvdb::VEC_CONTRAVARIANT_RELATIVE);
-        grid->setSaveFloatAsHalf(opt.half_float);
+        grid->setTransform(in.grid ? make_transform(vg, opt.world_scale) : xform->copy());
+        grid->setVectorType(in.grid ? openvdb::VEC_INVARIANT : openvdb::VEC_CONTRAVARIANT_RELATIVE);
+        grid->setSaveFloatAsHalf(opt.half_float && !in.full_precision);
         grids.push_back(grid);
     }
 

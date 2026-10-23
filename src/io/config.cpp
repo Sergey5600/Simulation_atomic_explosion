@@ -194,6 +194,16 @@ void parse_domain(const toml::table& t, DomainConfig& d) {
     if (d.trigger <= 0.f || d.trigger > 1.f) fail("domain.trigger must be in (0, 1]");
 }
 
+void parse_detail(const toml::table& t, RestParams& r) {
+    r.enabled = get_or<bool>(t, "enabled", r.enabled);
+    r.feature_voxels = float(get_or<double>(t, "feature_voxels", r.feature_voxels));
+    r.growth_ratio = float(get_or<double>(t, "growth_ratio", r.growth_ratio));
+    r.clock_origin = float(get_or<double>(t, "clock_origin", r.clock_origin));
+    if (r.feature_voxels <= 0.f) fail("detail.feature_voxels must be > 0");
+    if (r.growth_ratio <= 1.f) fail("detail.growth_ratio must be > 1");
+    if (r.clock_origin <= 0.f) fail("detail.clock_origin must be > 0");
+}
+
 void parse_blast(const toml::table& t, BlastParams& b) {
     b.start_time = float(get_or<double>(t, "start_time", b.start_time));
     b.yield_kt = float(get_or<double>(t, "yield_kt", b.yield_kt));
@@ -281,6 +291,7 @@ SceneConfig load_scene(const std::string& path) {
     if (const auto* t = subtable(root, "domain")) parse_domain(*t, cfg.domain);
     if (const auto* t = subtable(root, "blast")) parse_blast(*t, cfg.blast);
     if (const auto* t = subtable(root, "humidity")) parse_humidity(*t, cfg.humidity);
+    if (const auto* t = subtable(root, "detail")) parse_detail(*t, cfg.detail);
     return cfg;
 }
 

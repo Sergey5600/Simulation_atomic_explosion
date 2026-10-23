@@ -20,6 +20,10 @@ struct VdbVectorInput {
     const float* y = nullptr;
     const float* z = nullptr;
     float scale = 1.f;  // multiplier applied on export (e.g. unit conversion)
+    // Optional grid of its own (e.g. coarser than the frame); the vector is then stored on
+    // the voxels of that grid covering the active scalar voxels, dilated by one voxel.
+    const GridInfo* grid = nullptr;
+    bool full_precision = false;  // keep 32-bit floats even when the file uses half floats
 };
 
 struct VdbFrame {

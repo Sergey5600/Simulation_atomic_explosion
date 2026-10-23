@@ -566,6 +566,19 @@ void CompressibleSolver::export_field(ExportField field, FieldView out, float fl
     });
 }
 
+MacView CompressibleSolver::cell_velocity() {
+    FieldView r = var(0), mx = var(1), my = var(2), mz = var(3);
+    const Int3 n = grid_.dims;
+    FieldView vx{u1_[0].data(), n}, vy{u1_[1].data(), n}, vz{u1_[2].data(), n};
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const float inv = 1.f / r(i, j, k);
+        vx(i, j, k) = mx(i, j, k) * inv;
+        vy(i, j, k) = my(i, j, k) * inv;
+        vz(i, j, k) = mz(i, j, k) * inv;
+    });
+    return MacView{{u1_[0].data(), n, kCellOffset}, {u1_[1].data(), n, kCellOffset}, {u1_[2].data(), n, kCellOffset}};
+}
+
 CompressibleSolver::HandoffState CompressibleSolver::handoff_state() {
     // Use the second RK set (free between steps) as scratch: temperature, smoke, u, v, w, dust bins.
     FieldView r = var(0), mx = var(1), my = var(2), mz = var(3), e = var(4), smoke = var(5);

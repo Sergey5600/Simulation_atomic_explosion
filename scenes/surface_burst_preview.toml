@@ -14,7 +14,7 @@ voxel_size = 16.0              # m -> 1.5 x 1.5 x 1.0 km at the start
 dir = "out/surface_burst_preview"
 prefix = "explosion"
 fps = 24
-fields = ["density", "dust", "condensate", "temperature", "flame", "velocity"]
+fields = ["density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "rest"]
 preview_every = 10
 start_time = 0.002             # s; must not be earlier than blast.start_time
 

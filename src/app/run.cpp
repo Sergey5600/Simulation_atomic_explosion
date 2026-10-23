@@ -25,7 +25,7 @@ bool wants(const std::vector<std::string>& fields, const char* name) {
 }
 
 void validate_fields(const std::vector<std::string>& fields) {
-    static const char* known[] = {"density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity"};
+    static const char* known[] = {"density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "rest"};
     for (const std::string& f : fields) {
         if (std::none_of(std::begin(known), std::end(known), [&](const char* k) { return f == k; })) {
             throw std::runtime_error("unknown output field '" + f + "'");
@@ -77,6 +77,20 @@ void measure_cloud(const GridInfo& g, const std::vector<float>& density, const s
     hi = g.origin + Float3{float(i1 + 1), float(j1 + 1), float(k1 + 1)} * g.dx;
 }
 
+// RMS vorticity over the visible volume, weighted by its density: the typical level the
+// render-time detail is measured against, so the detail amount stays steady as the flow slows.
+float rms_vorticity(const std::vector<float>& vort, const std::vector<float>& density, const std::vector<float>& dust,
+                    const std::vector<float>& cond) {
+    double sw = 0.0, swv = 0.0;
+    for (std::size_t i = 0; i < vort.size(); ++i) {
+        const double w = double(density[i]) + double(dust[i]) + double(cond[i]);
+        if (w <= 1e-3) continue;
+        sw += w;
+        swv += w * double(vort[i]) * double(vort[i]);
+    }
+    return sw > 0.0 ? float(std::sqrt(swv / sw)) : 0.f;
+}
+
 }  // namespace
 
 int run_scene(const RunOptions& opt) {
@@ -121,6 +135,10 @@ int run_scene(const RunOptions& opt) {
     std::vector<float> h_density(n), h_dust(n), h_cond(n), h_temperature(n), h_flame(n);
     std::vector<float> h_vx(want_velocity ? n : 0), h_vy(want_velocity ? n : 0), h_vz(want_velocity ? n : 0);
     std::vector<float> h_vort(want_vorticity ? n : 0);
+    std::vector<float> h_rest[6];  // rest_a x, y, z, rest_b x, y, z (on the coarser rest grid)
+    if (wants(cfg.output.fields, "rest") && !scene->rest_fields()) {
+        log_warn("output.fields has \"rest\" but this scene has no rest fields ([detail] enabled = false?)");
+    }
 
     Manifest manifest;
     manifest.scene_name = cfg.name;
@@ -163,6 +181,16 @@ int run_scene(const RunOptions& opt) {
             scene->export_field(ExportField::VelZ, h_vz.data());
         }
         if (want_vorticity) scene->export_field(ExportField::Vorticity, h_vort.data());
+        const RestFields* rest = scene->rest_fields();
+        GridInfo rest_grid;
+        if (rest) {
+            rest_grid = rest->grid();
+            for (int c = 0; c < 6; ++c) {
+                const Buffer<float>& b = rest->component(c / 3, c % 3);
+                h_rest[c].resize(b.size());
+                b.download(h_rest[c].data(), b.size());
+            }
+        }
 
         const GridInfo fg = scene->grid();  // the domain may have grown
         VdbFrame frame;
@@ -177,6 +205,11 @@ int run_scene(const RunOptions& opt) {
             // Exported in world units per *video* second, so Blender's motion blur matches the slow motion.
             const float scale = float(cfg.output.world_scale * sim_dt * cfg.output.fps);
             frame.vectors.push_back({"velocity", h_vx.data(), h_vy.data(), h_vz.data(), scale});
+        }
+        if (rest) {
+            // Texture coordinates for render-time noise: full precision, on the rest grid.
+            frame.vectors.push_back({"rest_a", h_rest[0].data(), h_rest[1].data(), h_rest[2].data(), 1.f, &rest_grid, true});
+            frame.vectors.push_back({"rest_b", h_rest[3].data(), h_rest[4].data(), h_rest[5].data(), 1.f, &rest_grid, true});
         }
         frame.metadata["sim_time"] = float(t);
         frame.metadata["sim_dt"] = float(sim_dt);
@@ -212,6 +245,8 @@ int run_scene(const RunOptions& opt) {
         mf.cloud_max = mf.cloud_max * cfg.output.world_scale;
         mf.light_position = mf.light_position * cfg.output.world_scale;
         mf.active_voxels = stats.active_voxels;
+        if (rest) mf.rest_weight = rest->weight_a(t);
+        if (want_vorticity) mf.vorticity_ref = rms_vorticity(h_vort, h_density, h_dust, h_cond);
         mf.file_bytes = stats.file_bytes;
         manifest.frames.push_back(mf);
         write_manifest((out_dir / "manifest.json").string(), manifest);

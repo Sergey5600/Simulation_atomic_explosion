@@ -47,14 +47,16 @@ void write_manifest(const std::string& path, const Manifest& m) {
                           "\"voxel_size\": %.9g, \"domain_min\": [%.6g, %.6g, %.6g], \"domain_max\": [%.6g, %.6g, %.6g], "
                           "\"cloud_min\": [%.6g, %.6g, %.6g], \"cloud_max\": [%.6g, %.6g, %.6g], "
                           "\"light_position\": [%.6g, %.6g, %.6g], \"light_power\": %.9g, "
-                          "\"active_voxels\": %zu, \"file_bytes\": %zu}%s\n",
+                          "\"active_voxels\": %zu, \"file_bytes\": %zu, \"rest_weight\": %.6g, "
+                          "\"vorticity_ref\": %.6g}%s\n",
                           fr.number, json_escape(fr.file).c_str(), fr.sim_time, fr.sim_dt, double(fr.voxel_size),
                           double(fr.domain_min.x), double(fr.domain_min.y), double(fr.domain_min.z),
                           double(fr.domain_max.x), double(fr.domain_max.y), double(fr.domain_max.z),
                           double(fr.cloud_min.x), double(fr.cloud_min.y), double(fr.cloud_min.z),
                           double(fr.cloud_max.x), double(fr.cloud_max.y), double(fr.cloud_max.z),
                           double(fr.light_position.x), double(fr.light_position.y), double(fr.light_position.z),
-                          fr.light_power, fr.active_voxels, fr.file_bytes, i + 1 < m.frames.size() ? "," : "");
+                          fr.light_power, fr.active_voxels, fr.file_bytes, double(fr.rest_weight),
+                          double(fr.vorticity_ref), i + 1 < m.frames.size() ? "," : "");
             f << buf;
         }
         f << "  ]\n}\n";

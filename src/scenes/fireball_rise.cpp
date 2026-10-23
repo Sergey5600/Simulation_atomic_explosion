@@ -61,12 +61,24 @@ void init_dust(LowMachSolver& solver, const FireballConfig& fireball, const Dust
     }
 }
 
-RisePhase::RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm)
-    : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust, cfg.humidity) {
+RisePhase::RisePhase(const SceneConfig& cfg, Device dev, const Atmosphere& atm, std::unique_ptr<RestFields> rest)
+    : cfg_(cfg), solver_(dev, cfg.grid, atm, cfg.solver, cfg.radiation, cfg.dust, cfg.humidity), rest_(std::move(rest)) {
+    if (!rest_ && wants_rest_fields(cfg)) {
+        rest_ = std::make_unique<RestFields>(dev, cfg.grid, cfg.detail);
+        fresh_rest_ = true;
+    }
     if (cfg.profile) solver_.profiler().enable(dev);
     solver_.reset_to_ambient(cfg.wind);
     if (cfg.domain.expand && !LowMachSolver::can_coarsen(cfg.grid.dims)) {
         log_warn("domain.expand needs grid x, y divisible by 4 and z by 2: the domain will not grow");
+    }
+}
+
+void RisePhase::set_time(double t) {
+    time_ = t;
+    if (fresh_rest_) {
+        rest_->reset(t);
+        fresh_rest_ = false;
     }
 }
 
@@ -85,6 +97,10 @@ void RisePhase::advance_to(double t) {
         else if (dt > 0.5 * remaining) dt = 0.5 * remaining;
         const StepStats s = solver_.step(dt);
         time_ += dt;
+        if (rest_) {
+            rest_->advect(solver_.velocity().sampler(), dt, time_);
+            solver_.profiler().lap("rest");
+        }
         maybe_grow_domain();
         ++steps_;
         iterations_ += s.pcg_iterations;
@@ -123,6 +139,7 @@ void RisePhase::maybe_grow_domain() {
     const float half_width = 0.5f * std::min(g.dims.x, g.dims.y) * g.dx;
     if (e.top < d.trigger * height && e.radius < d.trigger * half_width) return;
     solver_.coarsen_domain();
+    if (rest_) rest_->coarsen(solver_.grid());
     ++expansions_;
     const GridInfo ng = solver_.grid();
     log_info("domain grown (cloud top %.0f m, radius %.0f m): voxel %.3g m, domain %.0f x %.0f x %.0f m", e.top,
@@ -149,6 +166,7 @@ public:
     void export_field(ExportField f, float* host) override { rise_.export_field(f, host); }
     std::string status() override { return rise_.status(); }
     std::string profile_report() override { return rise_.profile_report(); }
+    const RestFields* rest_fields() const override { return rise_.rest_fields(); }
     std::size_t memory_bytes() const override { return rise_.memory_bytes(); }
 
 private:

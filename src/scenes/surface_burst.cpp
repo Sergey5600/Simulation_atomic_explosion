@@ -21,6 +21,10 @@ public:
         blast_->reset_to_ambient();
         blast_->deposit_energy(cfg.seed);
         time_ = cfg.blast.start_time;
+        if (wants_rest_fields(cfg)) {
+            rest_ = std::make_unique<RestFields>(dev, cfg.grid, cfg.detail);
+            rest_->reset(time_);
+        }
         log_info("surface burst: %.1f kt (%.0f %% into the blast), starts at t = %.4f s, handoff to the buoyant "
                  "phase at t = %.2f s",
                  cfg.blast.yield_kt, 100.0 * cfg.blast.hydro_fraction, cfg.blast.start_time, cfg.blast.handoff_time);
@@ -42,6 +46,10 @@ public:
                 else if (dt > 0.5 * remaining) dt = 0.5 * remaining;
                 blast_->step(dt);
                 time_ += dt;
+                if (rest_) {
+                    rest_->advect(blast_->cell_velocity(), dt, time_);
+                    blast_->profiler().lap("rest");
+                }
                 ++steps_;
                 last_dt_ = dt;
             }
@@ -67,7 +75,10 @@ public:
         return buf;
     }
 
-    std::size_t memory_bytes() const override { return blast_ ? blast_->memory_bytes() : rise_->memory_bytes(); }
+    std::size_t memory_bytes() const override {
+        return blast_ ? blast_->memory_bytes() + (rest_ ? rest_->memory_bytes() : 0) : rise_->memory_bytes();
+    }
+    const RestFields* rest_fields() const override { return blast_ ? rest_.get() : rise_->rest_fields(); }
     std::string profile_report() override {
         return blast_ ? blast_->profiler().report_and_reset() : rise_->profile_report();
     }
@@ -92,7 +103,7 @@ private:
                     h.v[idx] += wv;
                 }
         }
-        rise_ = std::make_unique<RisePhase>(cfg_, dev_, atmosphere_);
+        rise_ = std::make_unique<RisePhase>(cfg_, dev_, atmosphere_, std::move(rest_));
         rise_->solver().load_cell_state(h.temperature, h.smoke, h.dust, h.u, h.v, h.w, &h.vapor, &h.condensate);
         rise_->set_time(time_);
     }
@@ -102,6 +113,7 @@ private:
     Atmosphere atmosphere_;
     std::unique_ptr<CompressibleSolver> blast_;
     std::unique_ptr<RisePhase> rise_;
+    std::unique_ptr<RestFields> rest_;  // during the blast; handed to the rise phase after
     double time_ = 0.0, last_dt_ = 0.0, step_ms_ = 0.0;
     int steps_ = 0;
 };

@@ -28,7 +28,18 @@ public:
     // Per-stage timing since the last call when profiling is on (SceneConfig::profile), else empty.
     virtual std::string profile_report() { return {}; }
     virtual std::size_t memory_bytes() const { return 0; }
+    // Rest fields for render-time detail, or null when the scene has none.
+    virtual const RestFields* rest_fields() const { return nullptr; }
 };
+
+// Rest fields are computed only when they are exported.
+inline bool wants_rest_fields(const SceneConfig& cfg) {
+    if (!cfg.detail.enabled) return false;
+    for (const std::string& f : cfg.output.fields) {
+        if (f == "rest") return true;
+    }
+    return false;
+}
 
 std::unique_ptr<Scene> make_scene(const SceneConfig& cfg, Device dev);
 

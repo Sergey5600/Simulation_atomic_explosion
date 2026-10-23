@@ -70,6 +70,7 @@ set(SIM_KERNEL_SOURCES
   src/scenes/test_fireball.cpp
   src/scenes/fireball_rise.cpp
   src/compressible/euler.cpp
+  src/upres/rest_fields.cpp
 )
 
 set(SIM_HOST_SOURCES
@@ -133,6 +134,7 @@ if(SIM_BUILD_TESTS)
     tests/test_config.cpp
     tests/test_lowmach.cpp
     tests/test_compressible.cpp
+    tests/test_upres.cpp
   )
   target_include_directories(simtests SYSTEM PRIVATE ${DOCTEST_INCLUDE_DIR})
   target_link_libraries(simtests PRIVATE simcore)
