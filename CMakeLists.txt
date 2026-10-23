@@ -64,7 +64,11 @@ endif()
 # and are compiled by nvcc in CUDA builds, so every kernel exists exactly once.
 set(SIM_KERNEL_SOURCES
   src/core/field_ops.cpp
+  src/lowmach/advection.cpp
+  src/lowmach/pressure.cpp
+  src/lowmach/solver.cpp
   src/scenes/test_fireball.cpp
+  src/scenes/fireball_rise.cpp
 )
 
 set(SIM_HOST_SOURCES
@@ -76,6 +80,8 @@ set(SIM_HOST_SOURCES
   src/io/vdb_writer.cpp
   src/io/manifest.cpp
   src/preview/preview.cpp
+  src/physics/atmosphere.cpp
+  src/scenes/scene.cpp
   src/app/run.cpp
 )
 
@@ -122,6 +128,7 @@ if(SIM_BUILD_TESTS)
     tests/test_schedule.cpp
     tests/test_vdb.cpp
     tests/test_config.cpp
+    tests/test_lowmach.cpp
   )
   target_include_directories(simtests SYSTEM PRIVATE ${DOCTEST_INCLUDE_DIR})
   target_link_libraries(simtests PRIVATE simcore)

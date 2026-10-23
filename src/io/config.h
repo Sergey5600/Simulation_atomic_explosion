@@ -7,6 +7,9 @@
 
 #include "core/grid.h"
 #include "core/schedule.h"
+#include "lowmach/solver.h"
+#include "physics/atmosphere.h"
+#include "physics/wind.h"
 
 namespace sim {
 
@@ -33,6 +36,20 @@ struct TestFireballConfig {
     float noise_amplitude = 0.25f;   // relative boundary displacement
 };
 
+// Initial state of the buoyant phase (scene type "fireball_rise"): the fireball once
+// the shock has detached and its pressure is back to ambient.
+struct FireballConfig {
+    float start_time = 1.f;            // s after detonation
+    float radius = 200.f;              // m
+    float center_height = 0.f;         // m; 0 = surface burst (hemisphere on the ground)
+    float vertical_scale = 1.f;        // < 1 flattens the fireball
+    float temperature = 4000.f;        // K in the core
+    float edge_width = 0.25f;          // fraction of the radius blending into ambient air
+    float noise_amplitude = 0.12f;     // relative boundary displacement (seeds the instabilities)
+    float noise_frequency = 0.012f;    // 1/m
+    float flame_temperature = 6000.f;  // K at which the exported flame field is 1
+};
+
 struct SceneConfig {
     std::string source_path;
     std::string name = "scene";
@@ -42,6 +59,11 @@ struct SceneConfig {
     GridInfo grid;
     OutputConfig output;
     TestFireballConfig test_fireball;
+    AtmosphereConfig atmosphere;
+    WindProfile wind;
+    FireballConfig fireball;
+    RadiationParams radiation;
+    SolverParams solver;
 };
 
 SceneConfig load_scene(const std::string& path);

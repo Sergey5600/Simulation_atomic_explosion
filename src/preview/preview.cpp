@@ -38,7 +38,32 @@ std::uint8_t to_srgb8(float linear) {
 
 void render_preview_png(const std::string& path, const PreviewInput& in, const PreviewOptions& opt) {
     const GridInfo& g = in.grid;
-    const int w = g.dims.x, h = g.dims.z;
+
+    // Frame the visible part of the volume (columns i0..i1, rows 0..k1), always including the ground.
+    int i0 = 0, i1 = g.dims.x - 1, k1 = g.dims.z - 1;
+    if (opt.auto_frame) {
+        int lo = g.dims.x, hi = -1, top = -1;
+        for (int k = 0; k < g.dims.z; ++k)
+            for (int j = 0; j < g.dims.y; ++j)
+                for (int i = 0; i < g.dims.x; ++i) {
+                    const std::int64_t idx = g.index(i, j, k);
+                    const bool visible = (in.density && in.density[idx] > 1e-3f) || (in.flame && in.flame[idx] > 1e-4f);
+                    if (!visible) continue;
+                    lo = std::min(lo, i);
+                    hi = std::max(hi, i);
+                    top = std::max(top, k);
+                }
+        if (hi >= 0) {
+            const int size = std::max({hi - lo + 1, top + 1, 24});
+            const int margin = size / 4;
+            const int half = (size + 2 * margin) / 2;
+            const int cx = (lo + hi) / 2;
+            i0 = std::max(0, cx - half);
+            i1 = std::min(g.dims.x - 1, cx + half);
+            k1 = std::min(g.dims.z - 1, top + margin + std::max(0, (i1 - i0) - (top + margin)) / 2);
+        }
+    }
+    const int w = i1 - i0 + 1, h = k1 + 1;
     std::vector<float> img(std::size_t(w) * h * 3, 0.f);
 
     const Rgb smoke{0.55f, 0.50f, 0.46f};
@@ -46,7 +71,8 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
 
 #pragma omp parallel for schedule(dynamic, 4)
     for (int k = 0; k < h; ++k) {
-        for (int i = 0; i < w; ++i) {
+        for (int x = 0; x < w; ++x) {
+            const int i = i0 + x;
             float tr = 1.f;
             Rgb L;
             for (int j = 0; j < g.dims.y && tr > 1e-3f; ++j) {
@@ -70,7 +96,7 @@ void render_preview_png(const std::string& path, const PreviewInput& in, const P
             // Sky gradient behind the volume.
             const float sky_t = float(k) / float(std::max(h - 1, 1));
             const Rgb sky{0.55f + 0.1f * sky_t, 0.70f + 0.08f * sky_t, 0.85f + 0.05f * sky_t};
-            const std::size_t o = (std::size_t(h - 1 - k) * w + i) * 3;  // image rows go top-down
+            const std::size_t o = (std::size_t(h - 1 - k) * w + x) * 3;  // image rows go top-down
             img[o + 0] = L.r + tr * sky.r;
             img[o + 1] = L.g + tr * sky.g;
             img[o + 2] = L.b + tr * sky.b;

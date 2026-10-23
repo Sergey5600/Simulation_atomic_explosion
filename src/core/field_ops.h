@@ -13,4 +13,7 @@ void fill_linear_index(ScalarField& f);
 // dst = a * x + dst
 void axpy(ScalarField& dst, float a, ScalarField& x);
 
+double sum(ScalarField& f);
+float max_abs(ScalarField& f);
+
 }  // namespace sim

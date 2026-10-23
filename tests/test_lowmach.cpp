@@ -1,0 +1,299 @@
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cmath>
+#include <random>
+#include <vector>
+
+#include "core/field_ops.h"
+#include "lowmach/advection.h"
+#include "lowmach/pressure.h"
+#include "lowmach/solver.h"
+#include "physics/atmosphere.h"
+#include "physics/constants.h"
+#include "scenes/fireball_rise.h"
+
+using namespace sim;
+
+namespace {
+
+Device test_device() { return cuda_available() ? Device::CUDA : Device::CPU; }
+
+std::vector<float> host(const Buffer<float>& b) { return b.to_host(); }
+
+// Divergence of a MAC field, computed on the host.
+std::vector<float> divergence(Int3 n, float dx, const std::vector<float>& u, const std::vector<float>& v,
+                              const std::vector<float>& w) {
+    std::vector<float> d(std::size_t(n.volume()));
+    const Int3 nu = u_dims(n), nv = v_dims(n), nw = w_dims(n);
+    auto iu = [&](int i, int j, int k) { return std::size_t(i + nu.x * (j + std::int64_t(nu.y) * k)); };
+    auto iv = [&](int i, int j, int k) { return std::size_t(i + nv.x * (j + std::int64_t(nv.y) * k)); };
+    auto iw = [&](int i, int j, int k) { return std::size_t(i + nw.x * (j + std::int64_t(nw.y) * k)); };
+    for (int k = 0; k < n.z; ++k)
+        for (int j = 0; j < n.y; ++j)
+            for (int i = 0; i < n.x; ++i)
+                d[std::size_t(i + n.x * (j + std::int64_t(n.y) * k))] =
+                    (u[iu(i + 1, j, k)] - u[iu(i, j, k)] + v[iv(i, j + 1, k)] - v[iv(i, j, k)] + w[iw(i, j, k + 1)] -
+                     w[iw(i, j, k)]) /
+                    dx;
+    return d;
+}
+
+AtmosphereConfig sea_level_standard() {
+    AtmosphereConfig c;
+    c.ground_altitude = 0.f;
+    c.ground_temperature = 288.15f;
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("atmosphere reproduces the standard atmosphere") {
+    const Atmosphere atm(sea_level_standard());
+    const AtmosphereState s0 = atm.at(0.0);
+    CHECK(s0.temperature == doctest::Approx(288.15));
+    CHECK(s0.pressure == doctest::Approx(101325.0));
+    CHECK(s0.density == doctest::Approx(1.225).epsilon(0.002));
+    const AtmosphereState s11 = atm.at(11000.0);
+    CHECK(s11.temperature == doctest::Approx(216.65));
+    CHECK(s11.pressure == doctest::Approx(22632.0).epsilon(0.005));
+    const AtmosphereState s20 = atm.at(20000.0);
+    CHECK(s20.pressure == doctest::Approx(5474.9).epsilon(0.01));
+}
+
+TEST_CASE("desert atmosphere is hydrostatic and stably stratified") {
+    AtmosphereConfig cfg;  // defaults: 1200 m, 303 K
+    const Atmosphere atm(cfg);
+    CHECK(atm.at(0.0).pressure == doctest::Approx(87700.0).epsilon(0.01));
+    double prev_theta = 0.0;
+    for (double z = 0.0; z < 15000.0; z += 250.0) {
+        const AtmosphereState a = atm.at(z), b = atm.at(z + 1.0);
+        // dp/dz = -rho g
+        CHECK((b.pressure - a.pressure) == doctest::Approx(-a.density * phys::kGravity).epsilon(0.01));
+        CHECK(a.theta >= prev_theta);
+        prev_theta = a.theta;
+    }
+}
+
+TEST_CASE("reductions agree with the host") {
+    GridInfo g;
+    g.dims = Int3{17, 9, 6};
+    ScalarField f("f", g, test_device());
+    fill_linear_index(f);
+    const double n = double(g.count());
+    CHECK(sum(f) == doctest::Approx(n * (n - 1) / 2));
+    CHECK(max_abs(f) == doctest::Approx(n - 1));
+    axpy(f, -2.f, f);  // f = -index
+    CHECK(max_abs(f) == doctest::Approx(n - 1));
+}
+
+TEST_CASE("projection enforces div(u) = S with a 25:1 density contrast") {
+    const Device dev = test_device();
+    const Int3 n{32, 32, 32};
+    const float dx = 10.f;
+    GridInfo g;
+    g.dims = n;
+    g.dx = dx;
+
+    // Light (hot) sphere in heavy air.
+    std::vector<float> rho(std::size_t(n.volume()), 1.2f), src(std::size_t(n.volume()), 0.f);
+    for (int k = 0; k < n.z; ++k)
+        for (int j = 0; j < n.y; ++j)
+            for (int i = 0; i < n.x; ++i) {
+                const float r = std::sqrt(float((i - 16) * (i - 16) + (j - 16) * (j - 16) + (k - 10) * (k - 10)));
+                const std::size_t idx = std::size_t(g.index(i, j, k));
+                if (r < 7.f) {
+                    rho[idx] = 0.048f;
+                    src[idx] = -0.05f;  // contracting while it cools
+                }
+            }
+    Buffer<float> rho_d(dev, rho.size()), src_d(dev, src.size());
+    rho_d.upload(rho.data(), rho.size());
+    src_d.upload(src.data(), src.size());
+
+    MacField vel(n, dev);
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> dist(-5.f, 5.f);
+    auto randomize = [&](Buffer<float>& b) {
+        std::vector<float> h(b.size());
+        for (float& x : h) x = dist(rng);
+        b.upload(h.data(), h.size());
+    };
+    randomize(vel.u);
+    randomize(vel.v);
+    randomize(vel.w);
+    {  // impermeable ground
+        std::vector<float> w = host(vel.w);
+        for (int j = 0; j < n.y; ++j)
+            for (int i = 0; i < n.x; ++i) w[std::size_t(i + n.x * j)] = 0.f;
+        vel.w.upload(w.data(), w.size());
+    }
+
+    double err0 = 0.0;
+    {
+        const std::vector<float> d0 = divergence(n, dx, host(vel.u), host(vel.v), host(vel.w));
+        for (std::size_t i = 0; i < d0.size(); ++i) err0 = std::max(err0, double(std::abs(d0[i] - src[i])));
+    }
+
+    PressureSolver ps(dev, n, dx);
+    CHECK(ps.levels() >= 3);
+    ps.set_density({rho_d.data(), n});
+    const ProjectionStats st = ps.project(vel, {src_d.data(), n}, 1e-6f, 300);
+    MESSAGE("MGPCG iterations: " << st.iterations << ", residual " << st.initial_residual << " -> " << st.final_residual);
+    CHECK(st.iterations > 0);
+    CHECK(st.iterations < 60);
+
+    const std::vector<float> d = divergence(n, dx, host(vel.u), host(vel.v), host(vel.w));
+    double err = 0.0;
+    for (std::size_t i = 0; i < d.size(); ++i) err = std::max(err, double(std::abs(d[i] - src[i])));
+    MESSAGE("max |div - S|: " << err0 << " -> " << err);
+    CHECK(err < 1e-4 * err0);
+
+    const std::vector<float> w = host(vel.w);
+    for (int j = 0; j < n.y; ++j)
+        for (int i = 0; i < n.x; ++i) REQUIRE(w[std::size_t(i + n.x * j)] == 0.f);
+
+    // Projecting again barely changes the velocity.
+    const std::vector<float> u1 = host(vel.u);
+    ps.project(vel, {src_d.data(), n}, 1e-6f, 300);
+    const std::vector<float> u2 = host(vel.u);
+    float change = 0.f;
+    for (std::size_t i = 0; i < u1.size(); ++i) change = std::max(change, std::abs(u2[i] - u1[i]));
+    CHECK(change < 1e-3f);
+}
+
+TEST_CASE("MacCormack advection translates without new extrema") {
+    const Device dev = test_device();
+    const Int3 n{48, 16, 16};
+    const float dx = 1.f;
+    GridInfo g;
+    g.dims = n;
+    g.dx = dx;
+
+    MacField vel(n, dev);
+    {
+        std::vector<float> u(vel.u.size(), 2.f);
+        vel.u.upload(u.data(), u.size());
+    }
+    std::vector<float> blob(std::size_t(n.volume()));
+    double mass0 = 0.0, cx0 = 0.0;
+    for (int k = 0; k < n.z; ++k)
+        for (int j = 0; j < n.y; ++j)
+            for (int i = 0; i < n.x; ++i) {
+                const float r2 = float((i - 12) * (i - 12) + (j - 8) * (j - 8) + (k - 8) * (k - 8));
+                const float v = std::exp(-r2 / 8.f);
+                blob[std::size_t(g.index(i, j, k))] = v;
+                mass0 += v;
+                cx0 += v * (i + 0.5);
+            }
+    cx0 /= mass0;
+    Buffer<float> a(dev, blob.size()), b(dev, blob.size());
+    a.upload(blob.data(), blob.size());
+    AdvectionScratch scratch(n, dev);
+    for (int s = 0; s < 6; ++s) {  // 6 steps of 1.5 s at 2 m/s = 18 cells
+        advect_maccormack(dev, vel.sampler(), 1.5f, dx, SampleView{a.data(), n, kCellOffset}, {b.data(), n}, scratch);
+        std::swap(a, b);
+    }
+    const std::vector<float> out = host(a);
+    double mass = 0.0, cx = 0.0;
+    float vmax = 0.f, vmin = 1.f;
+    for (int k = 0; k < n.z; ++k)
+        for (int j = 0; j < n.y; ++j)
+            for (int i = 0; i < n.x; ++i) {
+                const float v = out[std::size_t(g.index(i, j, k))];
+                mass += v;
+                cx += v * (i + 0.5);
+                vmax = std::max(vmax, v);
+                vmin = std::min(vmin, v);
+            }
+    cx /= mass;
+    CHECK(cx - cx0 == doctest::Approx(18.0).epsilon(0.02));
+    CHECK(vmax <= 1.f + 1e-5f);
+    CHECK(vmin >= -1e-6f);
+    CHECK(mass == doctest::Approx(mass0).epsilon(0.05));
+}
+
+TEST_CASE("atmosphere at rest stays at rest") {
+    GridInfo g;
+    g.dims = Int3{16, 16, 32};
+    g.dx = 200.f;
+    g.origin = Float3{-1600.f, -1600.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{});
+    solver.reset_to_ambient(WindProfile{});
+    const float t0 = solver.max_temperature();
+    for (int s = 0; s < 5; ++s) solver.step(1.0);
+    CHECK(solver.max_speed() < 1e-3f);
+    CHECK(solver.max_temperature() == doctest::Approx(t0).epsilon(1e-5));
+}
+
+TEST_CASE("wind profile is carried without decay") {
+    GridInfo g;
+    g.dims = Int3{16, 16, 16};
+    g.dx = 100.f;
+    g.origin = Float3{-800.f, -800.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    LowMachSolver solver(test_device(), g, atm, SolverParams{}, RadiationParams{});
+    WindProfile wind;
+    wind.heading_deg = 0.f;
+    wind.points = {{0.f, 2.f}, {1600.f, 6.f}};
+    solver.reset_to_ambient(wind);
+    for (int s = 0; s < 10; ++s) solver.step(solver.suggest_dt());
+    const std::vector<float> u = solver.velocity().u.to_host();
+    const Int3 nu = u_dims(g.dims);
+    const float expected = wind.speed_at(g.origin.z + 8.5f * g.dx);
+    CHECK(u[std::size_t(8 + nu.x * (8 + std::int64_t(nu.y) * 8))] == doctest::Approx(expected).epsilon(0.02));
+}
+
+TEST_CASE("hot fireball rises and cools") {
+    for (bool reflection : {true, false}) {
+        CAPTURE(reflection);
+        GridInfo g;
+        g.dims = Int3{24, 24, 48};
+        g.dx = 25.f;
+        g.origin = Float3{-300.f, -300.f, 0.f};
+        const Atmosphere atm{AtmosphereConfig{}};
+        SolverParams params;
+        params.reflection = reflection;
+        LowMachSolver solver(test_device(), g, atm, params, RadiationParams{});
+        solver.reset_to_ambient(WindProfile{});
+        FireballConfig fb;
+        fb.radius = 120.f;
+        fb.temperature = 3000.f;
+        init_fireball(solver, fb, 3);
+
+        auto hot_centroid_z = [&]() {
+            ScalarField d("d", g, solver.device()), t("t", g, solver.device()), f("f", g, solver.device()),
+                vx("vx", g, solver.device()), vy("vy", g, solver.device()), vz("vz", g, solver.device());
+            solver.fill_export(d.view(), t.view(), f.view(), vx.view(), vy.view(), vz.view(), 6000.f);
+            const std::vector<float> dens = d.buffer().to_host();
+            double m = 0.0, z = 0.0;
+            for (int k = 0; k < g.dims.z; ++k)
+                for (int j = 0; j < g.dims.y; ++j)
+                    for (int i = 0; i < g.dims.x; ++i) {
+                        const double v = dens[std::size_t(g.index(i, j, k))];
+                        m += v;
+                        z += v * (k + 0.5) * g.dx;
+                    }
+            return m > 0.0 ? z / m : 0.0;
+        };
+
+        const double z0 = hot_centroid_z();
+        const float t_start = solver.max_temperature();
+        double t = 0.0;
+        while (t < 10.0) {
+            const double dt = std::min(solver.suggest_dt(), 10.0 - t);
+            const StepStats s = solver.step(dt);
+            REQUIRE(std::isfinite(solver.max_speed()));
+            CHECK(s.pcg_iterations < 100 * s.projections);
+            t += dt;
+        }
+        const double z1 = hot_centroid_z();
+        MESSAGE("smoke centroid " << z0 << " m -> " << z1 << " m, Tmax " << t_start << " -> "
+                                  << solver.max_temperature() << " K, |u|max " << solver.max_speed() << " m/s");
+        CHECK(z1 > z0 + 150.0);
+        CHECK(solver.max_temperature() < t_start);
+        CHECK(solver.max_speed() > 20.f);
+        CHECK(solver.max_speed() < 400.f);
+    }
+}

@@ -1,0 +1,57 @@
+# M1 quick look: the buoyant phase of a ~20 kt surface burst at low resolution.
+# Runs on a CPU in minutes; use scenes/surface_20kt.toml on the GPU for quality.
+#
+#   nukesim scenes/fireball_rise_preview.toml
+
+[scene]
+name = "fireball_rise_preview"
+type = "fireball_rise"
+device = "auto"
+seed = 11
+
+[grid]
+resolution = [96, 96, 144]   # keep every axis divisible by 16 for the multigrid solver
+voxel_size = 40.0            # m -> 3.8 x 3.8 x 5.8 km
+
+[output]
+dir = "out/fireball_rise_preview"
+prefix = "explosion"
+fps = 24
+fields = ["density", "temperature", "flame", "velocity"]
+preview_every = 10
+start_time = 1.0             # must not be earlier than fireball.start_time
+
+[[output.schedule]]          # one frame every 0.5 s of simulated time
+mode = "constant"
+frames = 120
+dt = 0.5
+
+[atmosphere]
+ground_altitude = 1200.0     # m above sea level
+ground_temperature = 303.0   # K (30 C, desert)
+
+[wind]
+heading = 30.0               # degrees from +X towards +Y
+profile = [[0.0, 1.5], [10.0, 2.0], [3000.0, 6.0], [10000.0, 8.0]]   # [height m, speed m/s]
+
+[fireball]
+start_time = 1.0             # s after detonation
+radius = 200.0               # m
+center_height = 0.0          # surface burst
+temperature = 4000.0         # K
+edge_width = 0.3
+noise_amplitude = 0.12
+noise_frequency = 0.01
+flame_temperature = 6000.0
+
+[radiation]
+absorption = 3e-4            # 1/m at reference_temperature
+reference_temperature = 3000.0
+exponent = 2.0
+
+[solver]
+cfl = 1.0
+max_dt = 0.25
+reflection = true
+vorticity_confinement = 0.15
+pressure_tolerance = 1e-4

@@ -26,4 +26,14 @@ void axpy(ScalarField& dst, float a, ScalarField& x) {
     parallel_for(dst.device(), dst.grid().dims, SIM_LAMBDA(int i, int j, int k) { d(i, j, k) += a * s(i, j, k); });
 }
 
+double sum(ScalarField& f) {
+    FieldView v = f.view();
+    return parallel_sum(f.device(), f.grid().dims, SIM_LAMBDA(int i, int j, int k) { return double(v(i, j, k)); });
+}
+
+float max_abs(ScalarField& f) {
+    FieldView v = f.view();
+    return parallel_max(f.device(), f.grid().dims, SIM_LAMBDA(int i, int j, int k) { return fabsf(v(i, j, k)); });
+}
+
 }  // namespace sim

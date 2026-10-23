@@ -14,7 +14,7 @@
 #include "io/manifest.h"
 #include "io/vdb_writer.h"
 #include "preview/preview.h"
-#include "scenes/test_fireball.h"
+#include "scenes/scene.h"
 
 namespace sim {
 
@@ -66,10 +66,6 @@ int run_scene(const RunOptions& opt) {
     if (opt.preview_every >= 0) cfg.output.preview_every = opt.preview_every;
     validate_fields(cfg.output.fields);
 
-    if (cfg.type != "test_fireball") {
-        throw std::runtime_error("scene type '" + cfg.type + "' is not implemented yet (available: test_fireball)");
-    }
-
     const Device dev = parse_device(cfg.device);
     const GridInfo& g = cfg.grid;
     log_info("scene '%s' (%s) from %s", cfg.name.c_str(), cfg.type.c_str(), cfg.source_path.c_str());
@@ -86,10 +82,10 @@ int run_scene(const RunOptions& opt) {
     const std::filesystem::path preview_dir = out_dir / "preview";
     if (cfg.output.preview_every > 0) std::filesystem::create_directories(preview_dir);
 
-    ScalarField density("density", g, dev), temperature("temperature", g, dev), flame("flame", g, dev);
-    ScalarField vel_x("vel_x", g, dev), vel_y("vel_y", g, dev), vel_z("vel_z", g, dev);
-    TestFireballFields fields{&density, &temperature, &flame, &vel_x, &vel_y, &vel_z};
-    log_info("field memory: %s", format_bytes(6.0 * double(density.buffer().bytes())).c_str());
+    std::unique_ptr<Scene> scene = make_scene(cfg, dev);
+    ExportBuffers exp(g, dev);
+    log_info("memory: simulation %s, export %s", format_bytes(double(scene->memory_bytes())).c_str(),
+             format_bytes(double(exp.memory_bytes())).c_str());
     if (dev == Device::CUDA) {
         const DeviceMemoryInfo mem = device_memory_info(dev);
         log_info("GPU memory: %s free of %s", format_bytes(double(mem.free_bytes)).c_str(),
@@ -123,17 +119,19 @@ int run_scene(const RunOptions& opt) {
                                             : times[f] - times[f - 1];
 
         Timer step;
-        generate_test_fireball(cfg.test_fireball, cfg.seed, t, fields);
+        scene->advance_to(t);
+        scene->fill_export(exp);
         device_synchronize(dev);
-        t_sim += step.seconds();
+        const double frame_sim = step.seconds();
+        t_sim += frame_sim;
 
         step.reset();
-        density.buffer().download(h_density.data(), n);
-        temperature.buffer().download(h_temperature.data(), n);
-        flame.buffer().download(h_flame.data(), n);
-        vel_x.buffer().download(h_vx.data(), n);
-        vel_y.buffer().download(h_vy.data(), n);
-        vel_z.buffer().download(h_vz.data(), n);
+        exp.density.buffer().download(h_density.data(), n);
+        exp.temperature.buffer().download(h_temperature.data(), n);
+        exp.flame.buffer().download(h_flame.data(), n);
+        exp.vel_x.buffer().download(h_vx.data(), n);
+        exp.vel_y.buffer().download(h_vy.data(), n);
+        exp.vel_z.buffer().download(h_vz.data(), n);
 
         VdbFrame frame;
         frame.grid = g;
@@ -175,8 +173,9 @@ int run_scene(const RunOptions& opt) {
         }
         t_io += step.seconds();
 
-        log_info("frame %4d/%zu  t=%9.4f s  active=%9zu voxels  file=%s", number, times.size(), t,
-                 stats.active_voxels, format_bytes(double(stats.file_bytes)).c_str());
+        log_info("frame %4d/%zu  t=%9.4f s  sim %s  active=%9zu voxels  file=%s  %s", number, times.size(), t,
+                 format_seconds(frame_sim).c_str(), stats.active_voxels, format_bytes(double(stats.file_bytes)).c_str(),
+                 scene->status().c_str());
     }
 
     log_info("done: %zu frames in %s (compute %s, export %s), %s written to %s", times.size(),
