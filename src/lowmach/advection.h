@@ -11,7 +11,13 @@ namespace sim {
 // Scratch arrays large enough for any staggered component of an n-cell grid.
 struct AdvectionScratch {
     Buffer<float> a, b;
-    AdvectionScratch(Int3 n, Device dev) : a(dev, max_face_count(n)), b(dev, max_face_count(n)) {}
+    Buffer<float> px, py, pz;  // forward-traced positions, reused by the limiter pass
+    AdvectionScratch(Int3 n, Device dev)
+        : a(dev, max_face_count(n)),
+          b(dev, max_face_count(n)),
+          px(dev, max_face_count(n)),
+          py(dev, max_face_count(n)),
+          pz(dev, max_face_count(n)) {}
 };
 
 // dst = src carried along `vel` for dt seconds. src and dst share dims and offset
@@ -28,7 +34,8 @@ struct CellFieldSet {
     float* dst[kMaxAdvectFields] = {};
     float* bwd[kMaxAdvectFields] = {};
 };
-void advect_cells_maccormack(Device dev, const MacView& vel, float dt, float dx, Int3 n, const CellFieldSet& fields);
+void advect_cells_maccormack(Device dev, const MacView& vel, float dt, float dx, Int3 n, const CellFieldSet& fields,
+                             AdvectionScratch& scratch);
 
 // Advects the three components of `field` by `vel` into `out`.
 void advect_velocity(Device dev, const MacView& vel, float dt, float dx, const MacField& field, MacField& out,

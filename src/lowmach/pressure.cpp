@@ -150,8 +150,11 @@ void PressureSolver::residual(std::size_t l, FieldView x, FieldView b, FieldView
 void PressureSolver::smooth(std::size_t l, FieldView x, FieldView b, int color) {
     Level& lv = levels_[l];
     const Stencil st = stencil_of(lv.dims, lv.dx, lv.bx, lv.by, lv.bz);
-    parallel_for(dev_, lv.dims, SIM_LAMBDA(int i, int j, int k) {
-        if (((i + j + k) & 1) != color) return;
+    // One thread per cell of this colour: i = 2 ii + parity.
+    const Int3 n = lv.dims;
+    parallel_for(dev_, Int3{(n.x + 1) / 2, n.y, n.z}, SIM_LAMBDA(int ii, int j, int k) {
+        const int i = 2 * ii + ((j + k + color) & 1);
+        if (i >= n.x) return;
         const float d = st.diag(i, j, k);
         if (d > 0.f) x(i, j, k) = (b(i, j, k) + st.neighbours(x, i, j, k)) / d;
     });

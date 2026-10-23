@@ -122,6 +122,8 @@ LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere&
         scalars_next_.emplace_back(dev, std::size_t(grid.count()));
         scalars_bwd_.emplace_back(dev, std::size_t(grid.count()));
     }
+    // add_forces borrows three of them for the confinement force.
+    while (scalars_bwd_.size() < 3) scalars_bwd_.emplace_back(dev, std::size_t(grid.count()));
 }
 
 LowMachSolver::MoisturePointers LowMachSolver::moisture_pointers() {
@@ -142,8 +144,8 @@ LowMachSolver::DustPointers LowMachSolver::dust_pointers() {
 }
 
 std::size_t LowMachSolver::memory_bytes() const {
-    const std::size_t cells = (3 * scalars_.size() + 5) * rho_.bytes();
-    const std::size_t faces = 3 * (vel_.u.bytes() + vel_.v.bytes() + vel_.w.bytes()) + scratch_.a.bytes() + scratch_.b.bytes();
+    const std::size_t cells = (scalars_.size() + scalars_next_.size() + scalars_bwd_.size() + 5) * rho_.bytes();
+    const std::size_t faces = 3 * (vel_.u.bytes() + vel_.v.bytes() + vel_.w.bytes()) + 5 * scratch_.a.bytes();
     return cells + faces + pressure_.memory_bytes();
 }
 
@@ -459,15 +461,26 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
         oz(i, j, k) = ((xp.y - xm.y) - (yp.x - ym.x)) * inv_2dx;
     });
     const detail::Confinement conf{ox, oy, oz, n, params_.vorticity_confinement * grid_.dx, inv_2dx, 1.f / grid_.dx};
+    // Force per cell once (the MacCormack scratch is free here), then averaged onto the faces.
+    FieldView fx{scalars_bwd_[0].data(), n}, fy{scalars_bwd_[1].data(), n}, fz{scalars_bwd_[2].data(), n};
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const Float3 f = conf.force(i, j, k);
+        fx(i, j, k) = f.x;
+        fy(i, j, k) = f.y;
+        fz(i, j, k) = f.z;
+    });
     parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) {
-        u(i, j, k) += dt * 0.5f * (conf.force(i - 1, j, k).x + conf.force(i, j, k).x);
+        const int a = i > 0 ? i - 1 : 0, b = i < n.x ? i : n.x - 1;
+        u(i, j, k) += dt * 0.5f * (fx(a, j, k) + fx(b, j, k));
     });
     parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) {
-        v(i, j, k) += dt * 0.5f * (conf.force(i, j - 1, k).y + conf.force(i, j, k).y);
+        const int a = j > 0 ? j - 1 : 0, b = j < n.y ? j : n.y - 1;
+        v(i, j, k) += dt * 0.5f * (fy(i, a, k) + fy(i, b, k));
     });
     parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
         if (k == 0) return;
-        w(i, j, k) += dt * 0.5f * (conf.force(i, j, k - 1).z + conf.force(i, j, k).z);
+        const int b = k < n.z ? k : n.z - 1;
+        w(i, j, k) += dt * 0.5f * (fz(i, j, k - 1) + fz(i, j, b));
     });
 }
 
@@ -479,7 +492,7 @@ void LowMachSolver::advect_scalars(const MacView& vel, float dt) {
         set.dst[i] = scalars_next_[i].data();
         set.bwd[i] = scalars_bwd_[i].data();
     }
-    advect_cells_maccormack(dev_, vel, dt, grid_.dx, grid_.dims, set);
+    advect_cells_maccormack(dev_, vel, dt, grid_.dx, grid_.dims, set, scratch_);
     for (std::size_t i = 0; i < scalars_.size(); ++i) std::swap(scalars_[i], scalars_next_[i]);
 }
 
