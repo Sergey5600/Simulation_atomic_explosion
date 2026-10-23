@@ -27,7 +27,7 @@ namespace sim {
 struct RestParams {
     bool enabled = true;
     float feature_voxels = 3.f;  // noise feature length L in simulation voxels at the reset
-    float growth_ratio = 1.6f;   // each reset period is this many times the previous one
+    float growth_ratio = 1.25f;  // each reset period is this many times the previous one
     float clock_origin = 1e-3f;  // s, the logarithmic clock counts periods from here
 };
 

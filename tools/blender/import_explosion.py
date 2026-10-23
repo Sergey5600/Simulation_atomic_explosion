@@ -15,7 +15,7 @@ Options (after the "--"):
     --condensate X       cloud-water density multiplier (default 0.1)
     --emission X         fireball emission multiplier (default 0.05)
     --light-power W      peak power of the fireball point light in watts (default 5e9)
-    --detail X           strength of the sub-voxel noise detail from the rest grids (default 0.6, 0 = off)
+    --detail X           strength of the sub-voxel noise detail from the rest grids (default 0.35, 0 = off)
     --detail-scale X     noise frequency relative to the simulation voxel (default 1.0, larger = finer)
     --no-light           do not create the fireball light
     --preview-scene      also add a camera, sun, sky and desert ground plane
@@ -47,7 +47,7 @@ def parse_args():
     p.add_argument("--condensate", type=float, default=0.1)
     p.add_argument("--emission", type=float, default=0.05)
     p.add_argument("--light-power", type=float, default=5e9)
-    p.add_argument("--detail", type=float, default=0.6)
+    p.add_argument("--detail", type=float, default=0.35)
     p.add_argument("--detail-scale", type=float, default=1.0)
     p.add_argument("--no-light", action="store_true")
     p.add_argument("--preview-scene", action="store_true")
