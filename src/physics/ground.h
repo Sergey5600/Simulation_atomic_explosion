@@ -21,7 +21,7 @@ struct GroundParams {
     int smoothing = 1;          // friction velocity averaged over (2 n + 1)^2 ground cells
     // No lifting near the sides of the domain: the open boundaries let air in too easily, which
     // would raise walls of dust along the edges. Fraction of the half-width over which it fades.
-    float edge_fade = 0.15f;
+    float edge_fade = 0.3f;
     std::uint32_t seed = 7;
 };
 
