@@ -456,8 +456,11 @@ void LowMachSolver::add_forces(MacField& field, float dt) {
     const detail::Confinement conf{ox, oy, oz, n, params_.vorticity_confinement * grid_.dx, inv_2dx, 1.f / grid_.dx};
     // Force per cell once, then averaged onto the faces.
     FieldView fx{scratch_.px.data(), n}, fy{scratch_.py.data(), n}, fz{scratch_.pz.data(), n};
+    const float boost = params_.confinement_hot_boost;
+    const float inv_excess = 1.f / params_.confinement_hot_excess;
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
-        const Float3 f = conf.force(i, j, k);
+        Float3 f = conf.force(i, j, k);
+        if (boost > 0.f) f = f * (1.f + boost * fminf(fmaxf(th(i, j, k) / th_a[k] - 1.f, 0.f) * inv_excess, 1.f));
         fx(i, j, k) = f.x;
         fy(i, j, k) = f.y;
         fz(i, j, k) = f.z;
@@ -588,19 +591,42 @@ void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
     const float lift_rate = dust_.erosion * dt / dx;  // dY = C u* (u*^2 - u*t^2) dt / dx
     const FieldView u = const_cast<MacField&>(field).u_view(), v = const_cast<MacField&>(field).v_view();
 
+    // Lifting flux per ground cell, once for all bins (scratch_.a is free here): smoothed
+    // friction velocity times the erodibility of the ground under the cell.
+    FieldView flux{scratch_.a.data(), Int3{n.x, n.y, 1}};
+    if (lift_rate > 0.f) {
+        const GridInfo g = grid_;
+        const GroundParams gp = dust_.ground;
+        const float inv_scale = 1.f / gp.scale;
+        const int r = gp.smoothing;
+        parallel_for(dev_, Int3{n.x, n.y, 1}, SIM_LAMBDA(int i, int j, int) {
+            float sum = 0.f;
+            int cnt = 0;
+            for (int b = -r; b <= r; ++b)
+                for (int a = -r; a <= r; ++a) {
+                    const int ii = i + a, jj = j + b;
+                    if (ii < 0 || jj < 0 || ii >= n.x || jj >= n.y) continue;
+                    const float uc = 0.5f * (u(ii, jj, 0) + u(ii + 1, jj, 0));
+                    const float vc = 0.5f * (v(ii, jj, 0) + v(ii, jj + 1, 0));
+                    sum += sqrtf(uc * uc + vc * vc);
+                    ++cnt;
+                }
+            const float us = ustar_per_u * sum / float(cnt);
+            const Float3 p = g.cell_center(i, j, 0);
+            const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed);
+            flux(i, j, 0) = us > ut ? e * lift_rate * us * (us * us - ut * ut) : 0.f;
+        });
+    }
+
     for (int b = 0; b < kDustBins; ++b) {
         FieldView src = dust(b), dst{tmp_a_.data(), n};
         const float c = dust_.settling[b] * dt / dx;  // Courant number of the fall
         const float split = dust_.erosion_split[b];
+        const bool lifting = lift_rate > 0.f;
         parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
             const float above = k + 1 < n.z ? src(i, j, k + 1) : 0.f;  // clean air enters from the top
             float y = src(i, j, k) + fminf(c, 1.f) * (above - src(i, j, k));
-            if (k == 0 && lift_rate > 0.f) {
-                const float uc = 0.5f * (u(i, j, 0) + u(i + 1, j, 0));
-                const float vc = 0.5f * (v(i, j, 0) + v(i, j + 1, 0));
-                const float us = ustar_per_u * sqrtf(uc * uc + vc * vc);
-                if (us > ut) y += split * lift_rate * us * (us * us - ut * ut);
-            }
+            if (k == 0 && lifting) y += split * flux(i, j, 0);
             dst(i, j, k) = fminf(y, 0.5f);
         });
         std::swap(scalars_[std::size_t(kDust0 + b)], tmp_a_);

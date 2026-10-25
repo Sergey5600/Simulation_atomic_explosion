@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
 #include "lowmach/mac.h"
+#include "physics/ground.h"
 #include "upres/rest_fields.h"
 
 using namespace sim;
@@ -107,4 +109,24 @@ TEST_CASE("rest fields follow the domain when it doubles") {
     for (int i : {1, 8, 14}) {
         CHECK(x[std::size_t(rg.index(i, 4, 2))] == doctest::Approx(rg.cell_center(i, 4, 2).x / L).epsilon(1e-5));
     }
+}
+
+TEST_CASE("patchy ground keeps the mean dust lifting and has bare patches") {
+    double sum = 0.0;
+    int bare = 0, n = 0;
+    float lo = 1e9f, hi = 0.f;
+    for (int j = 0; j < 200; ++j)
+        for (int i = 0; i < 200; ++i) {
+            const float e = ground_erodibility(i * 25.f, j * 25.f, 0.8f, 1.f / 250.f, 7u);
+            sum += e;
+            bare += e == 0.f;
+            lo = std::min(lo, e);
+            hi = std::max(hi, e);
+            ++n;
+        }
+    CHECK(sum / n == doctest::Approx(1.0).epsilon(0.15));
+    CHECK(lo >= 0.f);
+    CHECK(bare > 0);       // hard ground between the sand
+    CHECK(hi > 1.5f);      // and loose patches that give more
+    CHECK(ground_erodibility(10.f, 20.f, 0.f, 1.f / 250.f, 7u) == 1.f);
 }

@@ -15,6 +15,13 @@ Options (after the "--"):
     --condensate X       cloud-water density multiplier (default 0.1)
     --emission X         fireball emission multiplier (default 0.05)
     --light-power W      peak power of the fireball point light in watts (default 5e9)
+    --glow X             inner glow of the hot cloud gas, 900..2500 K (default 1.0, 0 = off)
+    --name NAME          object/material prefix (default NukeSim); use different names to import
+                         several simulations side by side, e.g. Fireball, Mushroom, Sand
+    --dust-below M       show this simulation's dust only below M metres (soft edge), e.g. for the
+                         wide sand simulation
+    --dust-above M       show this simulation's dust only above M metres, e.g. for the mushroom when
+                         the sand simulation provides the ground dust
     --detail X           strength of the sub-voxel noise detail from the rest grids (default 0.35, 0 = off)
     --detail-scale X     noise frequency relative to the simulation voxel (default 1.0, larger = finer)
     --no-light           do not create the fireball light
@@ -38,8 +45,16 @@ MATERIAL_NAME = "NukeSim_Volume"
 LIGHT_NAME = "NukeSim_FireballLight"
 
 
-def parse_args():
-    argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+def set_names(prefix):
+    global OBJECT_NAME, MATERIAL_NAME, LIGHT_NAME
+    OBJECT_NAME = f"{prefix}_Explosion"
+    MATERIAL_NAME = f"{prefix}_Volume"
+    LIGHT_NAME = f"{prefix}_FireballLight"
+
+
+def parse_args(argv=None):
+    if argv is None:
+        argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     p = argparse.ArgumentParser(prog="import_explosion.py")
     p.add_argument("--dir", default=DEFAULT_DIR)
     p.add_argument("--density", type=float, default=0.2)
@@ -47,6 +62,10 @@ def parse_args():
     p.add_argument("--condensate", type=float, default=0.1)
     p.add_argument("--emission", type=float, default=0.05)
     p.add_argument("--light-power", type=float, default=5e9)
+    p.add_argument("--glow", type=float, default=1.0)
+    p.add_argument("--name", default="NukeSim")
+    p.add_argument("--dust-below", type=float, default=-1.0)
+    p.add_argument("--dust-above", type=float, default=-1.0)
     p.add_argument("--detail", type=float, default=0.35)
     p.add_argument("--detail-scale", type=float, default=1.0)
     p.add_argument("--no-light", action="store_true")
@@ -289,6 +308,27 @@ def build_material(args, world_scale, fields, manifest=None):
     if "dust" in fields:
         dust_attr = attribute("dust", 100)
         dust = multiply(dust_attr.outputs["Fac"], args.dust / world_scale, 100, "Dust")
+        if args.dust_below > 0 or args.dust_above > 0:
+            # Height window for the dust, so a wide ground simulation and the mushroom can share
+            # the stem without doubling it. The edge is soft over 40 % of the limit.
+            geo = nt.nodes.new("ShaderNodeNewGeometry")
+            geo.location = (-900, 100)
+            sep = nt.nodes.new("ShaderNodeSeparateXYZ")
+            sep.location = (-700, 100)
+            nt.links.new(geo.outputs["Position"], sep.inputs[0])
+            z = sep.outputs["Z"]
+            for limit, below in ((args.dust_below, True), (args.dust_above, False)):
+                if limit <= 0:
+                    continue
+                h = limit * world_scale
+                ramp = nt.nodes.new("ShaderNodeMapRange")
+                ramp.location = (-500, 150 if below else 50)
+                ramp.interpolation_type = "SMOOTHSTEP"
+                nt.links.new(z, ramp.inputs["Value"])
+                ramp.inputs["From Min"].default_value = h * (1.2 if below else 0.8)
+                ramp.inputs["From Max"].default_value = h * (0.8 if below else 1.2)
+                ramp.label = "Dust below" if below else "Dust above"
+                dust = math("MULTIPLY", dust, ramp.outputs["Result"], 100, ramp.label)
         total = math("ADD", smoke, dust, 250, "Smoke + dust")
         frac = math("DIVIDE", dust, math("ADD", total, 1e-6, 150), 50, "Dust fraction")
         color = mix_color(frac, SMOKE_COLOR, DUST_COLOR, 150)
@@ -315,6 +355,18 @@ def build_material(args, world_scale, fields, manifest=None):
 
     flame = attribute("flame", -300)
     emission = multiply(flame.outputs["Fac"], args.emission / world_scale, -300, "Emission")
+    if args.glow > 0 and "temperature" in fields:
+        # Inner glow: gas between ~900 K (dull red) and 2500 K keeps smouldering inside the cloud
+        # long after the (T / 6000 K)^4 flame has faded. Coloured by the same blackbody node.
+        ramp = nt.nodes.new("ShaderNodeMapRange")
+        ramp.location = (-150, -450)
+        ramp.label = "Glow 900..2500 K"
+        nt.links.new(temp.outputs["Fac"], ramp.inputs["Value"])
+        ramp.inputs["From Min"].default_value = 900.0
+        ramp.inputs["From Max"].default_value = 2500.0
+        glow = math("POWER", ramp.outputs["Result"], 2.0, -450, "Glow curve")
+        glow = math("MULTIPLY", glow, 0.02 * args.glow / world_scale, -500, "Glow strength")
+        emission = math("ADD", emission, glow, -400, "Flame + glow")
     if detail is not None:
         emission = math("MULTIPLY", emission, detail, -350, "Emission with detail")
     nt.links.new(emission, find_input(pv, ["Emission Strength"]))
@@ -418,8 +470,9 @@ def render_test(args, manifest):
     print(f"import_explosion.py: rendered frame {frame} to {scene.render.filepath}")
 
 
-def main():
-    args = parse_args()
+def run(args):
+    """Imports one simulation folder; returns the number of frames."""
+    set_names(args.name)
     manifest = load_manifest(args.dir)
     world_scale = float(manifest.get("world_scale", 1.0))
 
@@ -438,6 +491,12 @@ def main():
 
     if args.render_test:
         render_test(args, manifest)
+    return len(manifest["frames"])
 
 
-main()
+def main():
+    run(parse_args())
+
+
+if __name__ == "__main__":
+    main()

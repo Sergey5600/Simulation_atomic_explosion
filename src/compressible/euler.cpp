@@ -406,6 +406,9 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
     const float sp0 = dust_.erosion_split[0], sp1 = dust_.erosion_split[1], sp2 = dust_.erosion_split[2];
     const bool moist = humidity_.enabled;
     const int iv = kVapor;
+    const GroundParams gp = dust_.ground;
+    const float inv_scale = 1.f / gp.scale;
+    const int r = gp.smoothing;
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
@@ -437,9 +440,25 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
         const float mark = smoothstepf(0.8f * tf, 1.2f * tf, t);
         u.c[5][c] = fmaxf(u.c[5][c], rho * mark);
         if (k == 0 && lift > 0.f) {
-            const float us = ustar_per_u * sqrtf(vx * vx + vy * vy);
+            // Friction velocity from the wind averaged over neighbouring ground cells (only
+            // energy and scalars are written in this kernel, so reading neighbours is safe).
+            float sum = 0.f;
+            int cnt = 0;
+            for (int b = -r; b <= r; ++b)
+                for (int a = -r; a <= r; ++a) {
+                    const int ii = i + a, jj = j + b;
+                    if (ii < 0 || jj < 0 || ii >= n.x || jj >= n.y) continue;
+                    const std::int64_t cc = ii + std::int64_t(n.x) * jj;
+                    const float inv = 1.f / u.c[0][cc];
+                    const float ax = u.c[1][cc] * inv, ay = u.c[2][cc] * inv;
+                    sum += sqrtf(ax * ax + ay * ay);
+                    ++cnt;
+                }
+            const float us = ustar_per_u * sum / float(cnt);
             if (us > ut) {
-                const float dy = lift * us * (us * us - ut * ut);
+                const Float3 p = g.cell_center(i, j, 0);
+                const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed);
+                const float dy = e * lift * us * (us * us - ut * ut);
                 u.c[6][c] = fminf(u.c[6][c] + rho * sp0 * dy, 0.5f * rho);
                 u.c[7][c] = fminf(u.c[7][c] + rho * sp1 * dy, 0.5f * rho);
                 u.c[8][c] = fminf(u.c[8][c] + rho * sp2 * dy, 0.5f * rho);

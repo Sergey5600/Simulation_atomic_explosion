@@ -176,6 +176,12 @@ void parse_dust(const toml::table& t, DustParams& d, DustInitConfig& init) {
     bins(t, "erosion_split", d.erosion_split);
     d.mass_loading = get_or<bool>(t, "mass_loading", d.mass_loading);
     d.render_scale = float(get_or<double>(t, "render_scale", d.render_scale));
+    d.ground.variation = float(get_or<double>(t, "ground_variation", d.ground.variation));
+    d.ground.scale = float(get_or<double>(t, "ground_scale", d.ground.scale));
+    d.ground.smoothing = int(get_or<std::int64_t>(t, "lift_smoothing", d.ground.smoothing));
+    d.ground.seed = std::uint32_t(get_or<std::int64_t>(t, "ground_seed", d.ground.seed));
+    if (d.ground.scale <= 0.f) fail("dust.ground_scale must be > 0");
+    if (d.ground.smoothing < 0 || d.ground.smoothing > 4) fail("dust.lift_smoothing must be 0..4");
     init.fireball_loading = float(get_or<double>(t, "fireball_loading", init.fireball_loading));
     bins(t, "fireball_split", init.fireball_split);
     init.skirt_radius = float(get_or<double>(t, "skirt_radius", init.skirt_radius));
@@ -246,6 +252,9 @@ void parse_solver(const toml::table& t, SolverParams& c) {
     c.max_dt = float(get_or<double>(t, "max_dt", c.max_dt));
     c.reflection = get_or<bool>(t, "reflection", c.reflection);
     c.vorticity_confinement = float(get_or<double>(t, "vorticity_confinement", c.vorticity_confinement));
+    c.confinement_hot_boost = float(get_or<double>(t, "confinement_hot_boost", c.confinement_hot_boost));
+    c.confinement_hot_excess = float(get_or<double>(t, "confinement_hot_excess", c.confinement_hot_excess));
+    if (c.confinement_hot_excess <= 0.f) fail("solver.confinement_hot_excess must be > 0");
     c.smagorinsky = float(get_or<double>(t, "smagorinsky", c.smagorinsky));
     c.turbulent_prandtl = float(get_or<double>(t, "turbulent_prandtl", c.turbulent_prandtl));
     c.pressure_tolerance = float(get_or<double>(t, "pressure_tolerance", c.pressure_tolerance));

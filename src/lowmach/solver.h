@@ -28,6 +28,7 @@
 #include "lowmach/mac.h"
 #include "lowmach/pressure.h"
 #include "physics/atmosphere.h"
+#include "physics/ground.h"
 #include "physics/humidity.h"
 #include "physics/wind.h"
 
@@ -44,6 +45,10 @@ struct SolverParams {
     float max_dt = 0.1f;               // s
     bool reflection = true;            // advection-reflection (Zehnder et al. 2018): keeps vortices alive
     float vorticity_confinement = 0.15f;
+    // Extra confinement in hot cloud gas, where the entrainment eddies that make the cauliflower
+    // surface live: epsilon * (1 + boost * min(theta / theta_ambient - 1, hot_excess) / hot_excess).
+    float confinement_hot_boost = 0.f;
+    float confinement_hot_excess = 0.3f;
     float smagorinsky = 0.15f;         // subgrid turbulence constant C_s (0 = off)
     float turbulent_prandtl = 0.7f;    // momentum / heat eddy diffusivity ratio
     float pressure_tolerance = 1e-4f;  // relative residual
@@ -61,6 +66,7 @@ struct DustParams {
     float threshold_friction_velocity = 0.3f;  // m/s, loose desert sand
     float roughness_length = 0.001f;           // m
     float erosion_split[kDustBins] = {0.3f, 0.5f, 0.2f};
+    GroundParams ground;                       // patchy erodibility and smoothed lifting
     bool mass_loading = true;                  // dust weighs the air down
     float render_scale = 100.f;                // exported dust = scale * optical mass concentration / ground air density
 };

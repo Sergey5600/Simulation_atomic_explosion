@@ -4,16 +4,22 @@
 
 .EXAMPLE
     .\open_in_blender.bat
+    .\open_in_blender.bat -Shots                      (fireball + mushroom + sand from out\)
+    .\open_in_blender.bat -Dir out\mushroom_20kt -Extra "--glow 2 --detail 0.3"
     .\open_in_blender.bat -Dir out\test_fireball -NoPreviewScene
     .\open_in_blender.bat -Blender "D:\Blender 5.2\blender.exe"
 #>
 param(
     [string]$Dir = "out\test_fireball",
     [string]$Blender = "",
-    [switch]$NoPreviewScene
+    [switch]$NoPreviewScene,
+    [switch]$Shots,           # import out\fireball_closeup, out\mushroom_20kt and out\sand_20kt together
+    [string[]]$Extra = @()    # more import_explosion.py options, e.g. -Extra "--glow 2 --detail 0.3"
 )
 
 $ErrorActionPreference = 'Stop'
+# Through the .bat the options arrive as one string: split it into separate arguments.
+$Extra = @($Extra | ForEach-Object { $_ -split '[,\s]+' } | Where-Object { $_ })
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
@@ -39,6 +45,15 @@ if (-not $Blender -or -not (Test-Path $Blender)) {
     Write-Host "Blender not found. Pass its path: .\open_in_blender.bat -Blender `"C:\path\to\blender.exe`"" -ForegroundColor Red
     exit 1
 }
+if ($Shots) {
+    $script = Join-Path $repo 'tools\blender\import_shots.py'
+    $blenderArgs = @('--python', $script, '--', '--root', (Join-Path $repo 'out'))
+    if (-not $NoPreviewScene) { $blenderArgs += '--preview-scene' }
+    $blenderArgs += $Extra
+    Write-Host "Starting $Blender"
+    & $Blender @blenderArgs
+    exit 0
+}
 $outDir = Resolve-Path $Dir -ErrorAction SilentlyContinue
 if (-not $outDir -or -not (Test-Path (Join-Path $outDir 'manifest.json'))) {
     Write-Host "No manifest.json in '$Dir'. Run the simulation first, e.g.:" -ForegroundColor Red
@@ -49,5 +64,6 @@ if (-not $outDir -or -not (Test-Path (Join-Path $outDir 'manifest.json'))) {
 $script = Join-Path $repo 'tools\blender\import_explosion.py'
 $blenderArgs = @('--python', $script, '--', '--dir', $outDir.Path)
 if (-not $NoPreviewScene) { $blenderArgs += '--preview-scene' }
+$blenderArgs += $Extra
 Write-Host "Starting $Blender"
 & $Blender @blenderArgs
