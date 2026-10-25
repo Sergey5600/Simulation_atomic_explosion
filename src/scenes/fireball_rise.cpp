@@ -153,6 +153,7 @@ public:
     FireballRiseScene(const SceneConfig& cfg, Device dev) : atmosphere_(cfg.atmosphere), rise_(cfg, dev, atmosphere_) {
         init_fireball(rise_.solver(), cfg.fireball, cfg.seed);
         init_dust(rise_.solver(), cfg.fireball, cfg.dust_init, cfg.seed);
+        rise_.solver().perturb(cfg.wind.turbulence, cfg.wind.turbulence_scale, 0.f, 1.f, cfg.seed);
         rise_.set_time(cfg.fireball.start_time);
         const AtmosphereState ground = atmosphere_.at(0.0);
         log_info("atmosphere at ground: %.1f K, %.0f Pa, %.3f kg/m^3", ground.temperature, ground.pressure,

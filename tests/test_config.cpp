@@ -39,7 +39,9 @@ TEST_CASE("fireball scenes parse") {
 }
 
 TEST_CASE("surface burst scenes parse") {
-    for (const char* name : {"/scenes/surface_burst_20kt.toml", "/scenes/surface_burst_preview.toml"}) {
+    for (const char* name : {"/scenes/surface_burst_20kt.toml", "/scenes/surface_burst_preview.toml",
+                             "/scenes/surface_burst_20kt_max.toml", "/scenes/surface_burst_20kt_ultra.toml",
+                             "/scenes/fireball_closeup.toml", "/scenes/mushroom_20kt.toml", "/scenes/sand_20kt.toml"}) {
         CAPTURE(name);
         const SceneConfig cfg = load_scene(std::string(SIM_SOURCE_DIR) + name);
         CHECK(cfg.type == "surface_burst");
@@ -48,5 +50,8 @@ TEST_CASE("surface burst scenes parse") {
         CHECK(cfg.blast.handoff_time > cfg.blast.start_time);
         CHECK(cfg.dust_init.skirt_loading == 0.f);
         CHECK(cfg.grid.dims.x % 16 == 0);
+        CHECK(cfg.grid.dims.z % 16 == 0);
+        CHECK(cfg.solver.confinement_hot_boost > 0.f);
+        CHECK(cfg.dust.ground.variation > 0.f);
     }
 }

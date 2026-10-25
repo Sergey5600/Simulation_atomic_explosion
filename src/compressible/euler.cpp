@@ -409,6 +409,8 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
     const GroundParams gp = dust_.ground;
     const float inv_scale = 1.f / gp.scale;
     const int r = gp.smoothing;
+    const float x0 = g.origin.x, x1 = g.origin.x + n.x * g.dx, y0 = g.origin.y, y1 = g.origin.y + n.y * g.dx;
+    const float edge = gp.edge_fade * 0.5f * fminf(x1 - x0, y1 - y0);
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
         const std::int64_t c = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
@@ -457,7 +459,8 @@ void CompressibleSolver::apply_sources_after_step(float dt) {
             const float us = ustar_per_u * sum / float(cnt);
             if (us > ut) {
                 const Float3 p = g.cell_center(i, j, 0);
-                const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed);
+                const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed) *
+                                ground_edge_factor(p.x, p.y, x0, x1, y0, y1, edge);
                 const float dy = e * lift * us * (us * us - ut * ut);
                 u.c[6][c] = fminf(u.c[6][c] + rho * sp0 * dy, 0.5f * rho);
                 u.c[7][c] = fminf(u.c[7][c] + rho * sp1 * dy, 0.5f * rho);

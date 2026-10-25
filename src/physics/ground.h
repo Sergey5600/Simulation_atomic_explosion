@@ -19,8 +19,18 @@ struct GroundParams {
     float variation = 0.8f;     // 0 = uniform ground; ~1 leaves bare patches between loose sand
     float scale = 250.f;        // m, size of the largest patches
     int smoothing = 1;          // friction velocity averaged over (2 n + 1)^2 ground cells
+    // No lifting near the sides of the domain: the open boundaries let air in too easily, which
+    // would raise walls of dust along the edges. Fraction of the half-width over which it fades.
+    float edge_fade = 0.15f;
     std::uint32_t seed = 7;
 };
+
+// 0 at the sides of the domain [x0, x1] x [y0, y1], rising smoothly to 1 over `width` metres.
+SIM_INLINE float ground_edge_factor(float x, float y, float x0, float x1, float y0, float y1, float width) {
+    if (width <= 0.f) return 1.f;
+    const float d = fminf(fminf(x - x0, x1 - x), fminf(y - y0, y1 - y));
+    return smoothstepf(0.f, width, d);
+}
 
 // Relative erodibility at ground position (x, y): mean about 1, never negative.
 SIM_INLINE float ground_erodibility(float x, float y, float variation, float inv_scale, std::uint32_t seed) {

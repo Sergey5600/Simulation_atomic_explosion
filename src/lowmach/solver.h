@@ -116,6 +116,12 @@ public:
                          const std::vector<float>& v, const std::vector<float>& w,
                          const std::vector<float>* vapor = nullptr, const std::vector<float>* condensate = nullptr);
 
+    // Random perturbations that break the symmetry of the initial state: gusts of about
+    // `gust` m/s with eddies up to `gust_scale` m added to the velocity, and the temperature
+    // excess of hot gas scaled by 1 + heat_noise * fbm (features of `heat_scale` m). The
+    // velocity is projected afterwards.
+    void perturb(float gust, float gust_scale, float heat_noise, float heat_scale, std::uint32_t seed);
+
     // Largest stable time step for the current state (capped by params.max_dt).
     double suggest_dt();
     StepStats step(double dt);

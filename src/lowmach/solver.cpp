@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "core/noise.h"
 #include "core/parallel.h"
 #include "physics/constants.h"
 #include "physics/humidity.h"
@@ -332,6 +333,43 @@ void LowMachSolver::load_cell_state(const std::vector<float>& temperature, const
     project(vel_);
 }
 
+void LowMachSolver::perturb(float gust, float gust_scale, float heat_noise, float heat_scale, std::uint32_t seed) {
+    const Int3 n = grid_.dims;
+    const GridInfo g = grid_;
+    if (gust > 0.f) {
+        // fbm spreads about +-0.25, so 4 * gust * fbm gives gusts of about `gust` m/s.
+        const float a = 4.f * gust, f = 1.f / gust_scale;
+        FieldView u = vel_.u_view(), v = vel_.v_view(), w = vel_.w_view();
+        parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) {
+            const Float3 p = g.origin + make_f3(float(i), j + 0.5f, k + 0.5f) * g.dx;
+            u(i, j, k) += a * noise::fbm(p * f, 4, 2.1f, 0.5f, seed + 101u);
+        });
+        parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) {
+            const Float3 p = g.origin + make_f3(i + 0.5f, float(j), k + 0.5f) * g.dx;
+            v(i, j, k) += a * noise::fbm(p * f, 4, 2.1f, 0.5f, seed + 202u);
+        });
+        parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
+            if (k == 0) return;  // the ground stays impermeable
+            const Float3 p = g.origin + make_f3(i + 0.5f, j + 0.5f, float(k)) * g.dx;
+            w(i, j, k) += a * noise::fbm(p * f, 4, 2.1f, 0.5f, seed + 303u);
+        });
+    }
+    if (heat_noise > 0.f) {
+        FieldView th = theta();
+        const float* th_a = ambient_.theta.data();
+        const float a = 4.f * heat_noise, f = 1.f / heat_scale;
+        parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+            const float excess = th(i, j, k) - th_a[k];
+            if (excess <= 0.f) return;
+            const float m = fmaxf(1.f + a * noise::fbm(g.cell_center(i, j, k) * f, 4, 2.1f, 0.5f, seed + 404u), 0.2f);
+            th(i, j, k) = th_a[k] + excess * m;
+        });
+    }
+    source_.zero();
+    update_density();
+    project(vel_);
+}
+
 CloudExtent LowMachSolver::cloud_extent(float smoke_threshold) {
     const GridInfo g = grid_;
     FieldView sm = smoke();
@@ -599,6 +637,8 @@ void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
         const GroundParams gp = dust_.ground;
         const float inv_scale = 1.f / gp.scale;
         const int r = gp.smoothing;
+        const float x0 = g.origin.x, x1 = g.origin.x + n.x * g.dx, y0 = g.origin.y, y1 = g.origin.y + n.y * g.dx;
+        const float edge = gp.edge_fade * 0.5f * fminf(x1 - x0, y1 - y0);
         parallel_for(dev_, Int3{n.x, n.y, 1}, SIM_LAMBDA(int i, int j, int) {
             float sum = 0.f;
             int cnt = 0;
@@ -613,7 +653,8 @@ void LowMachSolver::settle_and_lift_dust(const MacField& field, float dt) {
                 }
             const float us = ustar_per_u * sum / float(cnt);
             const Float3 p = g.cell_center(i, j, 0);
-            const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed);
+            const float e = ground_erodibility(p.x, p.y, gp.variation, inv_scale, gp.seed) *
+                            ground_edge_factor(p.x, p.y, x0, x1, y0, y1, edge);
             flux(i, j, 0) = us > ut ? e * lift_rate * us * (us * us - ut * ut) : 0.f;
         });
     }

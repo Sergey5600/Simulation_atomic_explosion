@@ -105,6 +105,8 @@ private:
         }
         rise_ = std::make_unique<RisePhase>(cfg_, dev_, atmosphere_, std::move(rest_));
         rise_->solver().load_cell_state(h.temperature, h.smoke, h.dust, h.u, h.v, h.w, &h.vapor, &h.condensate);
+        rise_->solver().perturb(cfg_.wind.turbulence, cfg_.wind.turbulence_scale, cfg_.blast.handoff_noise,
+                                cfg_.blast.handoff_noise_scale, cfg_.seed);
         rise_->set_time(time_);
     }
 

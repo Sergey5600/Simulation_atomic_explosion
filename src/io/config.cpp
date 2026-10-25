@@ -127,6 +127,9 @@ void parse_atmosphere(const toml::table& t, AtmosphereConfig& c) {
 
 void parse_wind(const toml::table& t, WindProfile& w) {
     w.heading_deg = float(get_or<double>(t, "heading", w.heading_deg));
+    w.turbulence = float(get_or<double>(t, "turbulence", w.turbulence));
+    w.turbulence_scale = float(get_or<double>(t, "turbulence_scale", w.turbulence_scale));
+    if (w.turbulence < 0.f || w.turbulence_scale <= 0.f) fail("wind: turbulence must be >= 0 and turbulence_scale > 0");
     if (const auto* arr = t.get_as<toml::array>("profile")) {
         for (const auto& el : *arr) {
             const auto* pair = el.as_array();
@@ -180,6 +183,7 @@ void parse_dust(const toml::table& t, DustParams& d, DustInitConfig& init) {
     d.ground.scale = float(get_or<double>(t, "ground_scale", d.ground.scale));
     d.ground.smoothing = int(get_or<std::int64_t>(t, "lift_smoothing", d.ground.smoothing));
     d.ground.seed = std::uint32_t(get_or<std::int64_t>(t, "ground_seed", d.ground.seed));
+    d.ground.edge_fade = float(get_or<double>(t, "edge_fade", d.ground.edge_fade));
     if (d.ground.scale <= 0.f) fail("dust.ground_scale must be > 0");
     if (d.ground.smoothing < 0 || d.ground.smoothing > 4) fail("dust.lift_smoothing must be 0..4");
     init.fireball_loading = float(get_or<double>(t, "fireball_loading", init.fireball_loading));
@@ -217,6 +221,8 @@ void parse_blast(const toml::table& t, BlastParams& b) {
     b.deposit_radius = float(get_or<double>(t, "deposit_radius", b.deposit_radius));
     b.noise_amplitude = float(get_or<double>(t, "noise_amplitude", b.noise_amplitude));
     b.noise_frequency = float(get_or<double>(t, "noise_frequency", b.noise_frequency));
+    b.handoff_noise = float(get_or<double>(t, "handoff_noise", b.handoff_noise));
+    b.handoff_noise_scale = float(get_or<double>(t, "handoff_noise_scale", b.handoff_noise_scale));
     b.handoff_time = float(get_or<double>(t, "handoff_time", b.handoff_time));
     b.gamma = float(get_or<double>(t, "gamma", b.gamma));
     b.cfl = float(get_or<double>(t, "cfl", b.cfl));

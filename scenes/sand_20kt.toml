@@ -61,7 +61,7 @@ radiation_temperature_cap = 8000.0   # K, hottest apparent fireball surface
 radiation_length = 150.0       # m, about the fireball radius
 fireball_temperature = 2000.0  # K, air hotter than this becomes fireball gas
 fireball_dust_loading = 0.02   # kg soil per kg air in the initial hemisphere
-erosion = 3e-4                 # dust lifted by the blast wind
+erosion = 5e-4                 # dust lifted by the blast wind
 
 [fireball]
 flame_temperature = 6000.0     # K at which the exported flame field is 1
@@ -95,7 +95,7 @@ skirt_height = 120.0                 # m at ground zero
 skirt_loading = 0.0                  # the blast raises the skirt itself in this scene
 skirt_split = [0.4, 0.45, 0.15]
 # Sand lifted by the afterwind sucked in under the rising fireball (forms the stem).
-erosion = 0.03                       # vertical dust flux coefficient (blast-driven, very high)
+erosion = 0.045                       # vertical dust flux coefficient (blast-driven, very high)
 threshold_friction_velocity = 0.3    # m/s, loose desert sand
 roughness_length = 0.001             # m
 erosion_split = [0.3, 0.5, 0.2]

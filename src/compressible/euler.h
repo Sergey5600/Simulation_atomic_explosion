@@ -31,6 +31,10 @@ struct BlastParams {
     float noise_amplitude = 0.08f;     // relative radius perturbation (seeds the fireball surface instabilities)
     float noise_frequency = 0.08f;     // 1/m
     float handoff_time = 1.0f;         // s, switch to the low-Mach solver
+    // At the handoff the temperature excess of the hot gas is scaled by 1 + noise * fbm, which
+    // seeds billows of the cloud surface at all azimuths (the blast itself is nearly symmetric).
+    float handoff_noise = 0.1f;
+    float handoff_noise_scale = 40.f;  // m
     float gamma = 1.4f;
     float cfl = 0.3f;
     float gravity = 9.80665f;
