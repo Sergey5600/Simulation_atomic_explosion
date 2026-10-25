@@ -156,7 +156,7 @@ void render_slice_png(const std::string& path, const SliceInput& in, int min_siz
     const int W0 = 2 * w + gap;
     std::vector<float> img(std::size_t(W0) * h * 3, 0.f);
     const Rgb smoke{0.62f, 0.36f, 0.30f}, sand{0.78f, 0.66f, 0.50f}, water{0.96f, 0.97f, 0.98f};
-    for (int k = 0; k < h; ++k) {
+    for (int k = 0; k < hs; ++k) {
         for (int i = 0; i < w; ++i) {
             const std::int64_t idx = g.index(i, j, k);
             const float ds = in.density ? std::max(in.density[idx], 0.f) : 0.f;
