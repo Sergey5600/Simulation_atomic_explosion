@@ -150,7 +150,8 @@ Rgb heat_ramp(float t) {
 
 void render_slice_png(const std::string& path, const SliceInput& in, int min_size) {
     const GridInfo& g = in.grid;
-    const int w = g.dims.x, h = g.dims.z, gap = 2;
+    const int w = g.dims.x, hs = g.dims.z, gap = 2;
+    const int h = hs + gap + g.dims.y;  // the side slices on top, the views from above below
     const int j = g.dims.y / 2;
     const int W0 = 2 * w + gap;
     std::vector<float> img(std::size_t(W0) * h * 3, 0.f);
@@ -162,7 +163,7 @@ void render_slice_png(const std::string& path, const SliceInput& in, int min_siz
             const float dd = in.dust ? std::max(in.dust[idx], 0.f) : 0.f;
             const float dc = in.condensate ? std::max(in.condensate[idx], 0.f) : 0.f;
             const float d = ds + dd + dc;
-            const std::size_t row = std::size_t(h - 1 - k) * W0;
+            const std::size_t row = std::size_t(hs - 1 - k) * W0;
             if (d > 0.f) {
                 const float b = (1.f - std::exp(-2.f * d)) / d;
                 float* px = &img[(row + i) * 3];
@@ -181,7 +182,39 @@ void render_slice_png(const std::string& path, const SliceInput& in, int min_siz
             }
         }
         for (int x = w; x < w + gap; ++x) {  // separator
-            float* px = &img[(std::size_t(h - 1 - k) * W0 + x) * 3];
+            float* px = &img[(std::size_t(hs - 1 - k) * W0 + x) * 3];
+            px[0] = px[1] = px[2] = 0.35f;
+        }
+    }
+    // Views from above (image up = +Y): dust (left) and smoke (right) summed over the height,
+    // fixed exposure. They show how ragged the dust skirt and the base surge are.
+    for (int x = 0; x < W0; ++x)
+        for (int r = hs; r < hs + gap; ++r) {
+            float* px = &img[(std::size_t(r) * W0 + x) * 3];
+            px[0] = px[1] = px[2] = 0.35f;
+        }
+    for (int jj = 0; jj < g.dims.y; ++jj) {
+        const std::size_t row = std::size_t(hs + gap + (g.dims.y - 1 - jj)) * W0;
+        for (int i = 0; i < w; ++i) {
+            double dust = 0.0, smk = 0.0;
+            for (int k = 0; k < g.dims.z; ++k) {
+                const std::int64_t idx = g.index(i, jj, k);
+                if (in.dust) dust += std::max(in.dust[idx], 0.f);
+                if (in.density) smk += std::max(in.density[idx], 0.f);
+            }
+            const float a = 1.f - std::exp(-float(dust) * 0.05f);
+            const float b = 1.f - std::exp(-float(smk) * 0.05f);
+            float* pd = &img[(row + i) * 3];
+            pd[0] = a * sand.r;
+            pd[1] = a * sand.g;
+            pd[2] = a * sand.b;
+            float* ps = &img[(row + w + gap + i) * 3];
+            ps[0] = b * smoke.r;
+            ps[1] = b * smoke.g;
+            ps[2] = b * smoke.b;
+        }
+        for (int x = w; x < w + gap; ++x) {
+            float* px = &img[(row + x) * 3];
             px[0] = px[1] = px[2] = 0.35f;
         }
     }

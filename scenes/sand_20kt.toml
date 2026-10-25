@@ -76,8 +76,10 @@ cfl = 1.0
 max_dt = 0.1
 reflection = true
 vorticity_confinement = 0.15
-smagorinsky = 0.15             # subgrid turbulent mixing (0 = off)
+smagorinsky = 0.1             # subgrid turbulent mixing (0 = off)
 pressure_tolerance = 1e-4
+turbulent_prandtl = 1.0        # scalar mixing weaker than momentum: sharper smoke
+confinement_hot_boost = 1.5    # stronger small eddies in hot cloud gas (cauliflower surface)
 
 [dust]
 enabled = true

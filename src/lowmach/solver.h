@@ -47,10 +47,10 @@ struct SolverParams {
     float vorticity_confinement = 0.15f;
     // Extra confinement in hot cloud gas, where the entrainment eddies that make the cauliflower
     // surface live: epsilon * (1 + boost * min(theta / theta_ambient - 1, hot_excess) / hot_excess).
-    float confinement_hot_boost = 0.f;
+    float confinement_hot_boost = 1.5f;
     float confinement_hot_excess = 0.3f;
-    float smagorinsky = 0.15f;         // subgrid turbulence constant C_s (0 = off)
-    float turbulent_prandtl = 0.7f;    // momentum / heat eddy diffusivity ratio
+    float smagorinsky = 0.1f;          // subgrid turbulence constant C_s (0 = off)
+    float turbulent_prandtl = 1.0f;    // momentum / scalar eddy diffusivity ratio (higher = sharper smoke)
     float pressure_tolerance = 1e-4f;  // relative residual
     int pressure_max_iterations = 200;
 };
