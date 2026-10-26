@@ -13,6 +13,7 @@ for the wide shots hide "Fireball"); "Sand" belongs in every shot. Missing folde
 
 import os
 import sys
+import traceback
 
 import bpy
 
@@ -38,7 +39,7 @@ def main():
     root = os.path.abspath(bpy.path.abspath(root))
 
     frames = 0
-    imported = []
+    imported, failed = [], []
     for folder, name, extra in SHOTS:
         path = os.path.join(root, folder)
         if not os.path.isfile(os.path.join(path, "manifest.json")):
@@ -47,10 +48,19 @@ def main():
         opts = ["--dir", path, "--name", name] + extra + argv
         if preview and name == "Mushroom":
             opts.append("--preview-scene")
-        frames = max(frames, ie.run(ie.parse_args(opts)))
-        imported.append(name)
+        print(f"import_shots.py: importing {name} from {path}")
+        try:
+            frames = max(frames, ie.run(ie.parse_args(opts)))
+            imported.append(name)
+        except BaseException:  # keep going with the other shots, but say exactly what failed
+            print(f"import_shots.py: FAILED to import {name}:")
+            traceback.print_exc()
+            failed.append(name)
+    if failed:
+        print(f"import_shots.py: could not import {', '.join(failed)} (see the errors above)")
     if not imported:
-        raise SystemExit(f"import_shots.py: no simulations found in {root}")
+        print(f"import_shots.py: nothing imported from {root}")
+        return
     bpy.context.scene.frame_end = frames
     print(f"import_shots.py: imported {', '.join(imported)}; frames 1-{frames}")
 
