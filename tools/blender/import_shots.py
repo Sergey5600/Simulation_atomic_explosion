@@ -17,7 +17,18 @@ import traceback
 
 import bpy
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def _script_dir():
+    """Folder of this script. Blender does not always define __file__ for --python scripts,
+    so fall back to the path given after --python on the command line."""
+    path = globals().get("__file__")
+    if not path and "--python" in sys.argv:
+        path = sys.argv[sys.argv.index("--python") + 1]
+    return os.path.dirname(os.path.abspath(path)) if path else os.getcwd()
+
+
+sys.path.insert(0, _script_dir())
 import import_explosion as ie  # noqa: E402
 
 SHOTS = [
@@ -65,5 +76,4 @@ def main():
     print(f"import_shots.py: imported {', '.join(imported)}; frames 1-{frames}")
 
 
-if __name__ == "__main__":
-    main()
+main()

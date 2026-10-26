@@ -498,5 +498,6 @@ def main():
     run(parse_args())
 
 
-if __name__ == "__main__":
+# Run when started with --python, but not when import_shots.py imports this file as a module.
+if __name__ != "import_explosion":
     main()
