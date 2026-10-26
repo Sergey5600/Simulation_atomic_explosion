@@ -154,7 +154,7 @@ int run_scene(const RunOptions& opt) {
 
     const Timer total;
     double t_sim = 0.0, t_io = 0.0;
-    std::size_t total_bytes = 0;
+    std::size_t total_bytes = 0, last_file_bytes = 0;
     for (std::size_t f = 0; f < times.size(); ++f) {
         const int number = int(f) + 1;
         const double t = times[f];
@@ -163,6 +163,17 @@ int run_scene(const RunOptions& opt) {
                               : f == 0      ? times[1] - times[0]
                                             : times[f] - times[f - 1];
 
+        // Stop with a clear message before the disk runs out instead of writing broken frames.
+        {
+            std::error_code ec;
+            const std::filesystem::space_info sp = std::filesystem::space(out_dir, ec);
+            const double need = 3.0 * 1024 * 1024 * 1024 + 2.0 * double(last_file_bytes);
+            if (!ec && double(sp.available) < need) {
+                throw std::runtime_error("only " + format_bytes(double(sp.available)) + " free on the output disk before frame " +
+                                         std::to_string(number) + ": free some space; frames 1.." +
+                                         std::to_string(number - 1) + " are complete");
+            }
+        }
         Timer step;
         scene->advance_to(t);
         device_synchronize(dev);
@@ -217,6 +228,7 @@ int run_scene(const RunOptions& opt) {
         const std::string file = frame_file_name(cfg.output.prefix, number);
         const VdbWriteStats stats = write_vdb((out_dir / file).string(), frame, vdb_opt);
         total_bytes += stats.file_bytes;
+        last_file_bytes = stats.file_bytes;
 
         ManifestFrame mf;
         mf.number = number;

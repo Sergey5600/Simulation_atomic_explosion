@@ -115,8 +115,17 @@ VdbWriteStats write_vdb(const std::string& path, const VdbFrame& frame, const Vd
         file.write(grids, file_meta);
         file.close();
     }
+    // OpenVDB does not report a failed write (e.g. a full disk): an empty or truncated file
+    // would pass silently, so check what actually reached the disk before keeping it.
+    const std::uintmax_t written = std::filesystem::file_size(tmp_path);
+    if (written < 64) {
+        std::error_code ec;
+        std::filesystem::remove(tmp_path, ec);
+        throw std::runtime_error("failed to write " + path + " (" + std::to_string(written) +
+                                 " bytes written): is the disk full?");
+    }
     std::filesystem::rename(tmp_path, final_path);
-    stats.file_bytes = std::size_t(std::filesystem::file_size(final_path));
+    stats.file_bytes = std::size_t(written);
     return stats;
 }
 
