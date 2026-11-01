@@ -28,9 +28,9 @@ Set-Location $repo
 
 # Order matters: the close-up first (it is the one that has to be redone), the sand last.
 $shots = @(
-    @{ Key = 'fireball'; Scene = 'scenes\fireball_closeup.toml'; Folder = 'fireball_closeup'; Gb = 175 },
-    @{ Key = 'mushroom'; Scene = 'scenes\mushroom_20kt.toml';   Folder = 'mushroom_20kt';    Gb = 110 },
-    @{ Key = 'sand';     Scene = 'scenes\sand_20kt.toml';       Folder = 'sand_20kt';        Gb = 35 }
+    [pscustomobject]@{ Key = 'fireball'; Scene = 'scenes\fireball_closeup.toml'; Folder = 'fireball_closeup'; Gb = 175 },
+    [pscustomobject]@{ Key = 'mushroom'; Scene = 'scenes\mushroom_20kt.toml';   Folder = 'mushroom_20kt';    Gb = 110 },
+    [pscustomobject]@{ Key = 'sand';     Scene = 'scenes\sand_20kt.toml';       Folder = 'sand_20kt';        Gb = 35 }
 )
 if ($Only.Count -gt 0) {
     foreach ($o in $Only) {
@@ -43,6 +43,7 @@ if (-not (Test-Path $Exe)) {
     Write-Host "$Exe not found: build first with .\build_windows.bat" -ForegroundColor Red
     exit 1
 }
+$Exe = (Resolve-Path $Exe).Path
 $parent = if ($Out) { $Out } else { Join-Path $repo 'out' }
 New-Item -ItemType Directory -Force -Path $parent | Out-Null
 $parent = (Resolve-Path $parent).Path
@@ -74,9 +75,11 @@ foreach ($s in $shots) {
     Write-Host ""
     Write-Host ("=== {0}: {1} -> {2} (log: {3})" -f $s.Key, $s.Scene, $dir, $log) -ForegroundColor Cyan
     $start = Get-Date
-    # Through cmd so that the program's log lines on stderr are plain text, not PowerShell errors.
-    cmd /c "`"$Exe`" `"$($s.Scene)`" --out `"$dir`" 2>&1" | Tee-Object -FilePath $log
+    # Error lines arrive on stderr: keep them as plain text in the log instead of stopping the script.
+    $ErrorActionPreference = 'Continue'
+    & $Exe $s.Scene --out $dir 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
     $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
     $span = (Get-Date) - $start
     $time = '{0}h {1:00}m' -f [math]::Floor($span.TotalHours), $span.Minutes
     $result = if ($code -eq 0) { 'done' } else { "FAILED (exit $code, see the log)" }

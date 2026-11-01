@@ -75,7 +75,7 @@ smagorinsky = 0.1             # subgrid turbulent mixing (0 = off)
 pressure_tolerance = 1e-4
 turbulent_prandtl = 1.0        # scalar mixing weaker than momentum: sharper smoke
 confinement_hot_boost = 1.5    # stronger small eddies in hot cloud gas (cauliflower surface)
-disturbance = 0.8              # random subgrid eddies in cloud gas: breaks smooth lobes and dust streaks (< 1)
+disturbance = 0.8              # random subgrid eddies in cloud gas (subtle; above ~1 the flow blows up)
 
 [dust]
 enabled = true
