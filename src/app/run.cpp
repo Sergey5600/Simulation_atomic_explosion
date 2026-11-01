@@ -25,7 +25,7 @@ bool wants(const std::vector<std::string>& fields, const char* name) {
 }
 
 void validate_fields(const std::vector<std::string>& fields) {
-    static const char* known[] = {"density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "rest"};
+    static const char* known[] = {"density", "dust", "condensate", "temperature", "flame", "velocity", "vorticity", "age", "rest"};
     for (const std::string& f : fields) {
         if (std::none_of(std::begin(known), std::end(known), [&](const char* k) { return f == k; })) {
             throw std::runtime_error("unknown output field '" + f + "'");
@@ -135,7 +135,10 @@ int run_scene(const RunOptions& opt) {
     std::vector<float> h_density(n), h_dust(n), h_cond(n), h_temperature(n), h_flame(n);
     std::vector<float> h_vx(want_velocity ? n : 0), h_vy(want_velocity ? n : 0), h_vz(want_velocity ? n : 0);
     std::vector<float> h_vort(want_vorticity ? n : 0);
+    const bool want_age = wants(cfg.output.fields, "age");
+    std::vector<float> h_age(want_age ? n : 0);
     std::vector<float> h_rest[6];  // rest_a x, y, z, rest_b x, y, z (on the coarser rest grid)
+    std::vector<float> h_stretch[3];  // distortion of rest_a, rest_b, and zeros (packed as a vector)
     if (wants(cfg.output.fields, "rest") && !scene->rest_fields()) {
         log_warn("output.fields has \"rest\" but this scene has no rest fields ([detail] enabled = false?)");
     }
@@ -192,6 +195,7 @@ int run_scene(const RunOptions& opt) {
             scene->export_field(ExportField::VelZ, h_vz.data());
         }
         if (want_vorticity) scene->export_field(ExportField::Vorticity, h_vort.data());
+        if (want_age) scene->export_field(ExportField::Age, h_age.data());
         const RestFields* rest = scene->rest_fields();
         GridInfo rest_grid;
         if (rest) {
@@ -201,6 +205,11 @@ int run_scene(const RunOptions& opt) {
                 h_rest[c].resize(b.size());
                 b.download(h_rest[c].data(), b.size());
             }
+            const std::size_t rn = std::size_t(rest_grid.count());
+            for (std::vector<float>& v : h_stretch) v.resize(rn);
+            rest->distortion_to_host(0, h_stretch[0].data());
+            rest->distortion_to_host(1, h_stretch[1].data());
+            std::fill(h_stretch[2].begin(), h_stretch[2].end(), 0.f);
         }
 
         const GridInfo fg = scene->grid();  // the domain may have grown
@@ -212,6 +221,7 @@ int run_scene(const RunOptions& opt) {
         if (wants(cfg.output.fields, "temperature")) frame.scalars.push_back({"temperature", h_temperature.data()});
         if (wants(cfg.output.fields, "flame")) frame.scalars.push_back({"flame", h_flame.data()});
         if (wants(cfg.output.fields, "vorticity")) frame.scalars.push_back({"vorticity", h_vort.data()});
+        if (want_age) frame.scalars.push_back({"age", h_age.data()});
         if (want_velocity) {
             // Exported in world units per *video* second, so Blender's motion blur matches the slow motion.
             const float scale = float(cfg.output.world_scale * sim_dt * cfg.output.fps);
@@ -221,6 +231,9 @@ int run_scene(const RunOptions& opt) {
             // Texture coordinates for render-time noise: full precision, on the rest grid.
             frame.vectors.push_back({"rest_a", h_rest[0].data(), h_rest[1].data(), h_rest[2].data(), 1.f, &rest_grid, true});
             frame.vectors.push_back({"rest_b", h_rest[3].data(), h_rest[4].data(), h_rest[5].data(), 1.f, &rest_grid, true});
+            // x = distortion of rest_a, y = of rest_b: the renderer weighs the two per voxel.
+            frame.vectors.push_back({"rest_stretch", h_stretch[0].data(), h_stretch[1].data(), h_stretch[2].data(), 1.f,
+                                     &rest_grid, false});
         }
         frame.metadata["sim_time"] = float(t);
         frame.metadata["sim_dt"] = float(sim_dt);

@@ -8,12 +8,14 @@
     .\open_in_blender.bat -Dir out\mushroom_20kt -Extra "--glow 2 --detail 0.3"
     .\open_in_blender.bat -Dir out\test_fireball -NoPreviewScene
     .\open_in_blender.bat -Blender "D:\Blender 5.2\blender.exe"
+    .\open_in_blender.bat -Blend explosion.blend      (your saved scene, with the materials updated)
 #>
 param(
     [string]$Dir = "out\test_fireball",
     [string]$Blender = "",
     [switch]$NoPreviewScene,
     [switch]$Shots,           # import out\fireball_closeup, out\mushroom_20kt and out\sand_20kt together
+    [string]$Blend = "",      # open this .blend and update its imported simulations (update_materials.py)
     [string[]]$Extra = @()    # more import_explosion.py options, e.g. -Extra "--glow 2 --detail 0.3"
 )
 
@@ -44,6 +46,18 @@ if (-not $Blender) { $Blender = Find-Blender }
 if (-not $Blender -or -not (Test-Path $Blender)) {
     Write-Host "Blender not found. Pass its path: .\open_in_blender.bat -Blender `"C:\path\to\blender.exe`"" -ForegroundColor Red
     exit 1
+}
+if ($Blend) {
+    $file = Resolve-Path $Blend -ErrorAction SilentlyContinue
+    if (-not $file) {
+        Write-Host "'$Blend' not found" -ForegroundColor Red
+        exit 1
+    }
+    $script = Join-Path $repo 'tools\blender\update_materials.py'
+    $blenderArgs = @($file.Path, '--python', $script, '--') + $Extra
+    Write-Host "Starting $Blender (check the scene, then save it with Ctrl+S)"
+    & $Blender @blenderArgs
+    exit 0
 }
 if ($Shots) {
     $script = Join-Path $repo 'tools\blender\import_shots.py'

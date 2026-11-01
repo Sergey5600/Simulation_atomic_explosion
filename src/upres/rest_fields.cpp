@@ -105,6 +105,36 @@ void RestFields::advect(const MacView& vel, double dt, double time) {
     }
 }
 
+void RestFields::distortion_to_host(int field, float* host) const {
+    const GridInfo g = grid_;
+    const Int3 n = g.dims;
+    // Read only; FieldView has no const flavour.
+    const FieldView x{const_cast<float*>(buf_[3 * field].data()), n}, y{const_cast<float*>(buf_[3 * field + 1].data()), n},
+        z{const_cast<float*>(buf_[3 * field + 2].data()), n};
+    FieldView out{tmp_.data(), n};
+    const float len = length_[field];
+    const float inv_dx = 1.f / g.dx;
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        // Central differences, one-sided at the edges.
+        const int i0 = i > 0 ? i - 1 : i, i1 = i + 1 < n.x ? i + 1 : i;
+        const int j0 = j > 0 ? j - 1 : j, j1 = j + 1 < n.y ? j + 1 : j;
+        const int k0 = k > 0 ? k - 1 : k, k1 = k + 1 < n.z ? k + 1 : k;
+        const float sx = len * inv_dx / float(i1 - i0 > 0 ? i1 - i0 : 1);
+        const float sy = len * inv_dx / float(j1 - j0 > 0 ? j1 - j0 : 1);
+        const float sz = len * inv_dx / float(k1 - k0 > 0 ? k1 - k0 : 1);
+        float sum = 0.f;
+        const FieldView c[3] = {x, y, z};
+        for (int a = 0; a < 3; ++a) {
+            const float dx_ = (c[a](i1, j, k) - c[a](i0, j, k)) * sx;
+            const float dy_ = (c[a](i, j1, k) - c[a](i, j0, k)) * sy;
+            const float dz_ = (c[a](i, j, k1) - c[a](i, j, k0)) * sz;
+            sum += dx_ * dx_ + dy_ * dy_ + dz_ * dz_;
+        }
+        out(i, j, k) = fminf(fabsf(sum * (1.f / 3.f) - 1.f), 10.f);
+    });
+    tmp_.download(host, std::size_t(g.count()));
+}
+
 void RestFields::coarsen(const GridInfo& new_sim_grid) {
     const GridInfo old = grid_;
     const GridInfo ng = rest_grid_for(new_sim_grid);

@@ -51,6 +51,21 @@ struct SolverParams {
     float confinement_hot_excess = 0.3f;
     float smagorinsky = 0.1f;          // subgrid turbulence constant C_s (0 = off)
     float turbulent_prandtl = 1.0f;    // momentum / scalar eddy diffusivity ratio (higher = sharper smoke)
+    // Stochastic backscatter ("disturbance"): random velocity kicks a few voxels across, renewed
+    // every step, of about `disturbance` times the subgrid velocity C_s dx |S| per eddy turnover
+    // time 1/|S|, only in cloud gas (hot, smoky or dusty). It returns some of the energy the eddy
+    // viscosity removes at the grid scale, breaking up smooth lobes and dust streamers that would
+    // otherwise survive for seconds. Needs smagorinsky > 0. The energy it injects is about
+    // disturbance^2 times what the eddy viscosity dissipates (before the projection removes part
+    // of it), so keep it below ~1: 0.5-0.8 returns a fraction of the dissipation as random
+    // eddies; 3 makes the flow blow up.
+    float disturbance = 0.f;
+    float disturbance_scale = 3.f;     // voxels, size of the kicks
+    float disturbance_dust = 1e-3f;    // dust mixing ratio (kg/kg) that gets the full disturbance
+    // Hot-gas age (exported as "age"): smoke-weighted mean time since the gas was hotter than
+    // age_temperature, i.e. since it left the luminous fireball. Costs one cell field.
+    bool track_age = false;
+    float age_temperature = 2000.f;    // K
     float pressure_tolerance = 1e-4f;  // relative residual
     int pressure_max_iterations = 200;
 };
@@ -128,7 +143,7 @@ public:
 
     // Cell-centred export fields: density = smoke mass concentration relative to ground air,
     // dust = optical dust concentration (see DustParams::render_scale), temperature in K
-    // (0 where ambient), flame = (T / flame_temperature)^4 above ambient.
+    // (0 where ambient), flame = (T / flame_temperature)^4 above ambient, age in s (where there is smoke).
     void fill_export(FieldView density, FieldView dust, FieldView condensate, FieldView temperature, FieldView flame,
                      FieldView vel_x, FieldView vel_y, FieldView vel_z, float flame_temperature);
     // One export field into dst (see ExportField), or into the solver's own scratch and then
@@ -194,6 +209,9 @@ private:
     WindProfile wind_;
     HumidityProfile humidity_;
     int vapor_index_ = -1;      // vapour, then cloud water right after it
+    int age_index_ = -1;        // smoke * age (s), when params_.track_age
+    std::uint32_t step_count_ = 0;  // seeds the disturbance
+    float age_clock_ = 0.f;         // s simulated by this solver: no gas can be older (in this stage)
     Buffer<float> ambient_qv_;  // ambient specific humidity per level
     AtmosphereColumns ambient_;
     Buffer<float> wind_u_, wind_v_;  // ambient wind per level, for the current grid

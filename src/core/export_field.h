@@ -13,6 +13,7 @@ enum class ExportField {
     VelY,
     VelZ,
     Vorticity,    // |curl u| in 1/s, 0 where nothing is visible; drives render-time detail
+    Age,          // s since the smoke was last hotter than solver.age_temperature (0 without smoke)
     Count
 };
 
@@ -27,6 +28,7 @@ inline const char* export_field_name(ExportField f) {
         case ExportField::VelY: return "vel_y";
         case ExportField::VelZ: return "vel_z";
         case ExportField::Vorticity: return "vorticity";
+        case ExportField::Age: return "age";
         default: return "?";
     }
 }

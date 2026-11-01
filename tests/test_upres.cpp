@@ -130,3 +130,36 @@ TEST_CASE("patchy ground keeps the mean dust lifting and has bare patches") {
     CHECK(hi > 1.5f);      // and loose patches that give more
     CHECK(ground_erodibility(10.f, 20.f, 0.f, 1.f / 250.f, 7u) == 1.f);
 }
+
+TEST_CASE("rest distortion is zero after a reset and measures the shear since") {
+    const Device dev = test_device();
+    const GridInfo g = sim_grid();
+    RestParams p;
+    p.feature_voxels = 2.f;
+    p.growth_ratio = 1e6f;  // no reset during the test
+    p.clock_origin = 0.37f;
+    RestFields rest(dev, g, p);
+    rest.reset(1.0);
+    const GridInfo& rg = rest.grid();
+    std::vector<float> d(std::size_t(rg.count()));
+    rest.distortion_to_host(0, d.data());
+    CHECK(*std::max_element(d.begin(), d.end()) < 1e-4f);
+
+    // Shear u = s z for t seconds: the rest map x0 = x - s t z has |J|^2 = 3 + (s t)^2, so the
+    // distortion is (s t)^2 / 3.
+    const float s = 0.05f;
+    MacField vel(g.dims, dev);
+    const Int3 nu = u_dims(g.dims);
+    std::vector<float> u(vel.u.size());
+    for (int k = 0; k < nu.z; ++k)
+        for (int j = 0; j < nu.y; ++j)
+            for (int i = 0; i < nu.x; ++i) u[std::size_t(i + nu.x * (j + std::int64_t(nu.y) * k))] = s * (k + 0.5f) * g.dx;
+    vel.u.upload(u.data(), u.size());
+    for (int step = 0; step < 10; ++step) rest.advect(vel.sampler(), 1.0, 1.0 + (step + 1));
+    rest.distortion_to_host(0, d.data());
+    const float expected = (s * 10.f) * (s * 10.f) / 3.f;
+    // Away from the inflow edge and the top and bottom.
+    const float v = d[std::size_t(rg.index(rg.dims.x - 3, rg.dims.y / 2, rg.dims.z / 2))];
+    MESSAGE("distortion " << v << ", expected " << expected);
+    CHECK(v == doctest::Approx(expected).epsilon(0.15));
+}

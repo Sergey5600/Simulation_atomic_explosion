@@ -24,6 +24,10 @@ Options (after the "--"):
                          the sand simulation provides the ground dust
     --detail X           strength of the sub-voxel noise detail from the rest grids (default 0.35, 0 = off)
     --detail-scale X     noise frequency relative to the simulation voxel (default 1.0, larger = finer)
+    --spots X            mottled fireball surface: contrast of bright/dark patches (default 0.6, 0 = off)
+    --glow-patches X     inner glow in pockets instead of an even core (default 0.6, 0 = off)
+    --plasma X           opacity of the gas above ~2500 K (default 1.0, 0 = as thin as its density)
+    --age-color X        rusty fresh gas turning grey-brown with age, needs the "age" grid (default 1.0)
     --no-light           do not create the fireball light
     --preview-scene      also add a camera, sun, sky and desert ground plane
     --render-test PNG    render one frame to PNG and quit (for checking the setup)
@@ -68,6 +72,10 @@ def parse_args(argv=None):
     p.add_argument("--dust-above", type=float, default=-1.0)
     p.add_argument("--detail", type=float, default=0.35)
     p.add_argument("--detail-scale", type=float, default=1.0)
+    p.add_argument("--spots", type=float, default=0.6)
+    p.add_argument("--glow-patches", type=float, default=0.6)
+    p.add_argument("--plasma", type=float, default=1.0)
+    p.add_argument("--age-color", type=float, default=1.0)
     p.add_argument("--no-light", action="store_true")
     p.add_argument("--preview-scene", action="store_true")
     p.add_argument("--render-test", default="")
@@ -157,18 +165,28 @@ def import_volume(folder, manifest):
 
 # Fireball gas is shock-heated air full of nitrogen dioxide: the pinkish-brown of real caps.
 SMOKE_COLOR = (0.62, 0.36, 0.30, 1.0)
+FRESH_SMOKE_COLOR = (0.68, 0.32, 0.20, 1.0)  # with the "age" grid: just out of the fireball
+OLD_SMOKE_COLOR = (0.56, 0.45, 0.39, 1.0)    # ... and ten seconds later
 DUST_COLOR = (0.78, 0.66, 0.50, 1.0)  # desert sand
 WATER_COLOR = (0.96, 0.97, 0.98, 1.0)  # cloud droplets scatter almost all light
 
 
-def build_detail(nt, args, manifest, location_y):
-    """Sub-voxel detail: fractal noise evaluated at the advected rest coordinates, so it moves
-    and stretches with the smoke. Two rest grids are cross-faded (weight keyframed from the
-    manifest) and the amount follows the local vorticity relative to its per-frame RMS.
-    Returns a socket with the density multiplier (about 1 +- detail), or None."""
+def build_detail(nt, args, manifest, location_y, grids=()):
+    """Sub-voxel detail: noise evaluated at the advected rest coordinates, so it moves and
+    stretches with the smoke. Two rest grids are cross-faded (weight keyframed from the
+    manifest). When the simulation exported "rest_stretch" (how far each rest grid has been
+    distorted since its reset), the cross-fade leans per voxel towards the less stretched grid
+    and the noise fades where both are stretched, so it does not turn into streaks along fast
+    flow such as the stem.
+
+    Returns (detail, spots): detail is a density multiplier (about 1 +- detail) whose amount
+    follows the local vorticity relative to its per-frame RMS; spots is a coarser, contrasted
+    noise of about -1..1 for the mottled fireball surface and the patchy inner glow. Either is
+    None when switched off."""
     fields = manifest.get("fields", [])
-    if args.detail <= 0 or "rest" not in fields:
-        return None
+    want_spots = args.spots > 0 or args.glow_patches > 0
+    if "rest" not in fields or (args.detail <= 0 and not want_spots):
+        return None, None
     frames = manifest["frames"]
 
     def node(kind, x, y, label=""):
@@ -198,46 +216,97 @@ def build_detail(nt, args, manifest, location_y):
             sock.keyframe_insert("default_value", frame=f["number"])
         return sock
 
-    noises = []
+    attrs = []
     for i, grid in enumerate(("rest_a", "rest_b")):
-        attr = node("ShaderNodeAttribute", -1400, -200 * i, grid)
+        attr = node("ShaderNodeAttribute", -1600, -200 * i, grid)
         attr.attribute_type = "GEOMETRY"
         attr.attribute_name = grid
-        tex = node("ShaderNodeTexNoise", -1150, -200 * i, "Detail noise")
-        if hasattr(tex, "noise_dimensions"):
-            tex.noise_dimensions = "3D"
-        nt.links.new(attr.outputs["Vector"], tex.inputs["Vector"])
-        tex.inputs["Scale"].default_value = args.detail_scale
-        tex.inputs["Detail"].default_value = 5.0
-        tex.inputs["Roughness"].default_value = 0.55
-        noises.append(math("SUBTRACT", tex.outputs["Fac"], 0.5, -950, -200 * i))
+        attrs.append(attr.outputs["Vector"])
+
+    w = keyed_value("RestWeight", "rest_weight", -1600, -450, 0.5)
+    one_minus_w = math("SUBTRACT", 1.0, w, -1400, -450)
+    fade = None
+    if "rest_stretch" in grids:
+        # Per-voxel weights g = exp(-stretch / tolerance); w' = w ga / (w ga + (1 - w) gb).
+        st = node("ShaderNodeAttribute", -1600, -1000, "rest_stretch")
+        st.attribute_type = "GEOMETRY"
+        st.attribute_name = "rest_stretch"
+        sep = node("ShaderNodeSeparateXYZ", -1400, -1000)
+        nt.links.new(st.outputs["Vector"], sep.inputs[0])
+        tol = node("ShaderNodeValue", -1600, -1150, "Stretch tolerance")
+        tol.name = "StretchTolerance"
+        tol.outputs[0].default_value = 1.5
+        g = [math("EXPONENT", math("MULTIPLY", math("DIVIDE", sep.outputs[c], tol.outputs[0], -1200, -1000 - 100 * c),
+                                    -1.0, -1050, -1000 - 100 * c), 0.0, -900, -1000 - 100 * c) for c in (0, 1)]
+        wa = math("MULTIPLY", w, g[0], -750, -1000)
+        wb = math("MULTIPLY", one_minus_w, g[1], -750, -1100)
+        total = math("ADD", math("ADD", wa, wb, -600, -1050), 1e-6, -450, -1050)
+        w = math("DIVIDE", wa, total, -300, -1000, "Weight A per voxel")
+        one_minus_w = math("SUBTRACT", 1.0, w, -150, -1000)
+        fade = math("DIVIDE", math("ADD", math("MULTIPLY", wa, g[0], -600, -1200), math("MULTIPLY", wb, g[1], -600, -1300),
+                                   -450, -1250), total, -300, -1250, "Unstretched share")
 
     # Variance-preserving cross-fade: (w a + (1 - w) b) / sqrt(w^2 + (1 - w)^2).
-    w = keyed_value("RestWeight", "rest_weight", -1150, -450, 0.5)
-    one_minus_w = math("SUBTRACT", 1.0, w, -950, -450)
-    blend = math("ADD", math("MULTIPLY", noises[0], w, -750, 0), math("MULTIPLY", noises[1], one_minus_w, -750, -200),
-                 -550, -100, "Cross-fade")
-    norm = math("SQRT", math("ADD", math("MULTIPLY", w, w, -750, -450), math("MULTIPLY", one_minus_w, one_minus_w, -750, -550),
-                             -550, -500), 0.0, -350, -500)
-    noise = math("DIVIDE", blend, math("MAXIMUM", norm, 0.5, -200, -500), -150, -100, "Noise (about +-0.5)")
+    norm = math("MAXIMUM", math("SQRT", math("ADD", math("MULTIPLY", w, w, -950, -450),
+                                                     math("MULTIPLY", one_minus_w, one_minus_w, -950, -550), -800, -500),
+                                0.0, -650, -500), 0.5, -500, -500)
 
-    # Amount: a base everywhere plus more where the flow is turbulent; factor = 1 + 2 amount noise.
-    if "vorticity" in fields:
-        vort = node("ShaderNodeAttribute", -1150, -650, "vorticity")
-        vort.attribute_type = "GEOMETRY"
-        vort.attribute_name = "vorticity"
-        ref = keyed_value("VorticityRef", "vorticity_ref", -1150, -800, 1.0)
-        turb = math("DIVIDE", vort.outputs["Fac"], math("MAXIMUM", ref, 1e-6, -950, -800), -750, -700)
-        turb = math("MINIMUM", turb, 1.5, -550, -700, "Turbulence 0..1.5")
-        amount = math("ADD", math("MULTIPLY", turb, 0.6, -350, -700), 0.4, -150, -700, "Detail amount")
-        scaled = math("MULTIPLY", math("MULTIPLY", noise, amount, 50, -250), 2.0 * args.detail, 250, -250)
-    else:
-        scaled = math("MULTIPLY", noise, 2.0 * args.detail, 250, -250)
-    factor = math("ADD", scaled, 1.0, 450, -100)
-    return math("MAXIMUM", factor, 0.0, 650, -100, "Detail factor")
+    def crossfaded(scale, detail, roughness, y, label):
+        noises = []
+        for i, vec in enumerate(attrs):
+            tex = node("ShaderNodeTexNoise", -1350, y - 200 * i, label)
+            if hasattr(tex, "noise_dimensions"):
+                tex.noise_dimensions = "3D"
+            nt.links.new(vec, tex.inputs["Vector"])
+            tex.inputs["Scale"].default_value = scale
+            tex.inputs["Detail"].default_value = detail
+            tex.inputs["Roughness"].default_value = roughness
+            noises.append(math("SUBTRACT", tex.outputs["Fac"], 0.5, -1150, y - 200 * i))
+        blend = math("ADD", math("MULTIPLY", noises[0], w, -950, y), math("MULTIPLY", noises[1], one_minus_w, -950, y - 200),
+                     -800, y - 100, "Cross-fade")
+        return math("DIVIDE", blend, norm, -650, y - 100, label + " (about +-0.5)")
+
+    detail = None
+    if args.detail > 0:
+        noise = crossfaded(args.detail_scale, 5.0, 0.55, 0, "Detail noise")
+        # Amount: a base everywhere plus more where the flow is turbulent; factor = 1 + 2 amount noise.
+        if "vorticity" in fields:
+            vort = node("ShaderNodeAttribute", -1150, -650, "vorticity")
+            vort.attribute_type = "GEOMETRY"
+            vort.attribute_name = "vorticity"
+            ref = keyed_value("VorticityRef", "vorticity_ref", -1150, -800, 1.0)
+            turb = math("DIVIDE", vort.outputs["Fac"], math("MAXIMUM", ref, 1e-6, -950, -800), -750, -700)
+            turb = math("MINIMUM", turb, 1.5, -550, -700, "Turbulence 0..1.5")
+            amount = math("ADD", math("MULTIPLY", turb, 0.6, -350, -700), 0.4, -150, -700, "Detail amount")
+            scaled = math("MULTIPLY", math("MULTIPLY", noise, amount, 50, -250), 2.0 * args.detail, 250, -250)
+        else:
+            scaled = math("MULTIPLY", noise, 2.0 * args.detail, 250, -250)
+        if fade is not None:
+            scaled = math("MULTIPLY", scaled, fade, 350, -300, "Fade where stretched")
+        factor = math("ADD", scaled, 1.0, 450, -100)
+        detail = math("MAXIMUM", factor, 0.0, 650, -100, "Detail factor")
+
+    spots = None
+    if want_spots:
+        # Features about three times larger than the detail, with a hard contrast.
+        sn = crossfaded(0.3 * args.detail_scale, 2.0, 0.5, -1500, "Spot noise")
+        ramp = node("ShaderNodeMapRange", -450, -1600, "Spots -1..1")
+        ramp.clamp = True
+        nt.links.new(sn, ramp.inputs["Value"])
+        ramp.inputs["From Min"].default_value = -0.1
+        ramp.inputs["From Max"].default_value = 0.1
+        ramp.inputs["To Min"].default_value = -1.0
+        ramp.inputs["To Max"].default_value = 1.0
+        spots = ramp.outputs["Result"]
+        if fade is not None:
+            spots = math("MULTIPLY", spots, fade, -250, -1600, "Spots where unstretched")
+    return detail, spots
 
 
-def build_material(args, world_scale, fields, manifest=None):
+def build_material(args, world_scale, fields, manifest=None, grids=None):
+    """grids: names of the grids in the files (defaults to the exported fields); grids that
+    only newer simulations write (age, rest_stretch) are used when present."""
+    grids = set(grids) if grids is not None else set(fields)
     mat = bpy.data.materials.get(MATERIAL_NAME) or bpy.data.materials.new(MATERIAL_NAME)
     nt = ensure_node_tree(mat)
     nt.nodes.clear()
@@ -282,9 +351,33 @@ def build_material(args, world_scale, fields, manifest=None):
                 nt.links.new(v, node.inputs[i])
         return node.outputs[0]
 
+    def map_range(socket, lo, hi, y, label, to_lo=0.0, to_hi=1.0):
+        node = nt.nodes.new("ShaderNodeMapRange")
+        node.location = (-150, y)
+        node.label = label
+        node.clamp = True
+        nt.links.new(socket, node.inputs["Value"])
+        node.inputs["From Min"].default_value = lo
+        node.inputs["From Max"].default_value = hi
+        node.inputs["To Min"].default_value = to_lo
+        node.inputs["To Max"].default_value = to_hi
+        return node.outputs["Result"]
+
+    temp = attribute("temperature", -100) if "temperature" in fields else None
+
     # Exported values are per metre; convert to per Blender unit.
     dens = attribute("density", 300)
     smoke = multiply(dens.outputs["Fac"], args.density / world_scale, 300, "Density")
+    opacity = None
+    if args.plasma > 0 and temp is not None:
+        # The luminous fireball is opaque: hot air absorbs its own light. Its exported density is
+        # low (the gas is 10-30 times thinner than cold air), so above ~2500 K it is raised up to
+        # (1 + 15 plasma) times, which turns the ball into a glowing surface instead of a haze.
+        # The flame emission is raised by the same factor (a good absorber is a good emitter), so
+        # the surface keeps its brightness instead of hiding the light inside.
+        hot = map_range(temp.outputs["Fac"], 2500.0, 7000.0, 450, "Plasma 2500..7000 K")
+        opacity = math("ADD", math("MULTIPLY", hot, 15.0 * args.plasma, 450), 1.0, 450, "Plasma opacity")
+        smoke = math("MULTIPLY", smoke, opacity, 400, "Opaque fireball")
 
     def by_id(sockets, identifier):
         return next(sk for sk in sockets if sk.identifier == identifier)
@@ -300,6 +393,14 @@ def build_material(args, world_scale, fields, manifest=None):
             else:
                 nt.links.new(value, by_id(mix.inputs, ident))
         return by_id(mix.outputs, "Result_Color")
+
+    # Smoke colour: fresh fireball gas is rusty with nitrogen dioxide; it turns greyer-brown as
+    # it ages, mixes and the NO2 is diluted (age in seconds since the gas left the fireball).
+    smoke_color = SMOKE_COLOR
+    if "age" in grids and args.age_color > 0:
+        age = attribute("age", 550)
+        smoke_color = mix_color(map_range(age.outputs["Fac"], 1.0, 1.0 + 11.0 / args.age_color, 550, "Age 1..12 s"),
+                                FRESH_SMOKE_COLOR, OLD_SMOKE_COLOR, 550)
 
     # Smoke, sand and cloud water share one volume: densities add, the colour is the
     # density-weighted mix of the three.
@@ -331,45 +432,57 @@ def build_material(args, world_scale, fields, manifest=None):
                 dust = math("MULTIPLY", dust, ramp.outputs["Result"], 100, ramp.label)
         total = math("ADD", smoke, dust, 250, "Smoke + dust")
         frac = math("DIVIDE", dust, math("ADD", total, 1e-6, 150), 50, "Dust fraction")
-        color = mix_color(frac, SMOKE_COLOR, DUST_COLOR, 150)
+        color = mix_color(frac, smoke_color, DUST_COLOR, 150)
     if "condensate" in fields:
         cond_attr = attribute("condensate", -50)
         cond = multiply(cond_attr.outputs["Fac"], args.condensate / world_scale, -50, "Cloud water")
         dry = total
         total = math("ADD", dry, cond, 0, "Total density")
         frac = math("DIVIDE", cond, math("ADD", total, 1e-6, -100), -50, "Water fraction")
-        color = mix_color(frac, color if color is not None else SMOKE_COLOR, WATER_COLOR, 0)
-    detail = build_detail(nt, args, manifest or {"fields": fields, "frames": []}, -900)
+        color = mix_color(frac, color if color is not None else smoke_color, WATER_COLOR, 0)
+    detail, spots = build_detail(nt, args, manifest or {"fields": fields, "frames": []}, -900, grids)
     if detail is not None:
         total = math("MULTIPLY", total, detail, -50, "Density with detail")
     nt.links.new(total, find_input(pv, ["Density"]))
-    if color is not None:
-        nt.links.new(color, find_input(pv, ["Color"]))
+    if color is None:
+        color = smoke_color
+    if isinstance(color, tuple):
+        set_input(pv, ["Color"], color)
     else:
-        set_input(pv, ["Color"], SMOKE_COLOR)
-    temp = attribute("temperature", -100)
-    bb = nt.nodes.new("ShaderNodeBlackbody")
-    bb.location = (-150, -100)
-    nt.links.new(temp.outputs["Fac"], bb.inputs["Temperature"])
-    nt.links.new(bb.outputs[0], find_input(pv, ["Emission Color"]))
+        nt.links.new(color, find_input(pv, ["Color"]))
 
-    flame = attribute("flame", -300)
-    emission = multiply(flame.outputs["Fac"], args.emission / world_scale, -300, "Emission")
-    if args.glow > 0 and "temperature" in fields:
-        # Inner glow: gas between ~900 K (dull red) and 2500 K keeps smouldering inside the cloud
-        # long after the (T / 6000 K)^4 flame has faded. Coloured by the same blackbody node.
-        ramp = nt.nodes.new("ShaderNodeMapRange")
-        ramp.location = (-150, -450)
-        ramp.label = "Glow 900..2500 K"
-        nt.links.new(temp.outputs["Fac"], ramp.inputs["Value"])
-        ramp.inputs["From Min"].default_value = 900.0
-        ramp.inputs["From Max"].default_value = 2500.0
-        glow = math("POWER", ramp.outputs["Result"], 2.0, -450, "Glow curve")
-        glow = math("MULTIPLY", glow, 0.02 * args.glow / world_scale, -500, "Glow strength")
-        emission = math("ADD", emission, glow, -400, "Flame + glow")
-    if detail is not None:
-        emission = math("MULTIPLY", emission, detail, -350, "Emission with detail")
-    nt.links.new(emission, find_input(pv, ["Emission Strength"]))
+    emission = None
+    if "flame" in fields:
+        flame = attribute("flame", -300)
+        emission = multiply(flame.outputs["Fac"], args.emission / world_scale, -300, "Emission")
+        if opacity is not None:
+            emission = math("MULTIPLY", emission, opacity, -300, "Emission x opacity")
+        if spots is not None and args.spots > 0:
+            # Mottled fireball: brighter and darker patches that move with the gas.
+            emission = math("MULTIPLY", emission,
+                            math("MAXIMUM", math("ADD", math("MULTIPLY", spots, args.spots, -250), 1.0, -250), 0.0, -250),
+                            -300, "Flame with spots")
+    if temp is not None:
+        bb = nt.nodes.new("ShaderNodeBlackbody")
+        bb.location = (-150, -100)
+        nt.links.new(temp.outputs["Fac"], bb.inputs["Temperature"])
+        nt.links.new(bb.outputs[0], find_input(pv, ["Emission Color"]))
+        if args.glow > 0:
+            # Inner glow: gas between ~900 K (dull red) and 2500 K keeps smouldering inside the
+            # cloud long after the (T / 6000 K)^4 flame has faded. Coloured by the same blackbody.
+            glow = math("POWER", map_range(temp.outputs["Fac"], 900.0, 2500.0, -450, "Glow 900..2500 K"), 2.0, -450,
+                        "Glow curve")
+            glow = math("MULTIPLY", glow, 0.02 * args.glow / world_scale, -500, "Glow strength")
+            if spots is not None and args.glow_patches > 0:
+                # Glowing pockets seen through gaps in the darker gas, not an even orange core.
+                glow = math("MULTIPLY", glow,
+                            math("MAXIMUM", math("ADD", math("MULTIPLY", spots, args.glow_patches, -550), 1.0, -550),
+                                 0.0, -550), -500, "Glow in patches")
+            emission = glow if emission is None else math("ADD", emission, glow, -400, "Flame + glow")
+    if emission is not None:
+        if detail is not None:
+            emission = math("MULTIPLY", emission, detail, -350, "Emission with detail")
+        nt.links.new(emission, find_input(pv, ["Emission Strength"]))
     return mat
 
 
@@ -478,14 +591,14 @@ def run(args):
 
     setup_scene_timing(manifest)
     obj = import_volume(args.dir, manifest)
+    grids = [g.name for g in obj.data.grids]
     obj.data.materials.clear()
-    obj.data.materials.append(build_material(args, world_scale, manifest.get("fields", []), manifest))
+    obj.data.materials.append(build_material(args, world_scale, manifest.get("fields", []), manifest, grids))
     if not args.no_light:
         build_light(args, manifest)
     if args.preview_scene or args.render_test:
         build_preview_scene(manifest)
 
-    grids = [g.name for g in obj.data.grids]
     print(f"import_explosion.py: imported {len(manifest['frames'])} frames from {args.dir}; "
           f"grids in frame 1: {grids}")
 

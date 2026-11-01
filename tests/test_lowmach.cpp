@@ -516,3 +516,105 @@ TEST_CASE("air pushed up by a rising bubble condenses") {
         CHECK(std::isfinite(solver.max_speed()));
     }
 }
+
+namespace {
+
+// Smoke-weighted mean and maximum of the exported hot-gas age.
+void age_moments(LowMachSolver& solver, double& mean, double& max_age) {
+    const GridInfo& g = solver.grid();
+    ScalarField a("age", g, solver.device());
+    solver.export_field(ExportField::Age, a.view(), 6000.f);
+    const std::vector<float> age = a.buffer().to_host();
+    std::vector<float> sm(std::size_t(g.count()));
+    device_copy(sm.data(), Device::CPU, solver.smoke().data, solver.device(), sm.size() * sizeof(float));
+    double w = 0.0, s = 0.0;
+    max_age = 0.0;
+    for (std::size_t i = 0; i < sm.size(); ++i) {
+        if (sm[i] < 0.05f) continue;
+        w += sm[i];
+        s += double(sm[i]) * age[i];
+        max_age = std::max(max_age, double(age[i]));
+    }
+    mean = w > 0.0 ? s / w : 0.0;
+}
+
+}  // namespace
+
+TEST_CASE("hot-gas age counts the time since the smoke was last hot") {
+    GridInfo g;
+    g.dims = Int3{16, 16, 32};
+    g.dx = 25.f;
+    g.origin = Float3{-200.f, -200.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    // Above every temperature: the age is the time since the start. Below: always fresh.
+    for (const float t_age : {1e5f, 100.f}) {
+        CAPTURE(t_age);
+        SolverParams params;
+        params.track_age = true;
+        params.age_temperature = t_age;
+        LowMachSolver solver(test_device(), g, atm, params, RadiationParams{});
+        solver.reset_to_ambient(WindProfile{});
+        FireballConfig fb;
+        fb.radius = 100.f;
+        fb.temperature = 2500.f;
+        init_fireball(solver, fb, 3);
+        double t = 0.0;
+        while (t < 6.0) {
+            const double dt = std::min(solver.suggest_dt(), 6.0 - t);
+            solver.step(dt);
+            t += dt;
+        }
+        double mean = 0.0, max_age = 0.0;
+        age_moments(solver, mean, max_age);
+        MESSAGE("age: smoke-weighted mean " << mean << " s, max " << max_age << " s after " << t << " s");
+        if (t_age > 1e4f) {
+            CHECK(mean == doctest::Approx(t).epsilon(0.05));
+            CHECK(max_age <= t * 1.0001 + 1e-3);
+        } else {
+            CHECK(max_age == 0.0);
+        }
+    }
+}
+
+TEST_CASE("disturbance adds bounded eddies in the cloud gas only") {
+    GridInfo g;
+    g.dims = Int3{24, 24, 32};
+    g.dx = 25.f;
+    g.origin = Float3{-300.f, -300.f, 0.f};
+    const Atmosphere atm{AtmosphereConfig{}};
+    std::vector<float> w_ref, w_dist;
+    for (const float d : {0.f, 0.8f}) {
+        SolverParams params;
+        params.smagorinsky = 0.1f;
+        params.disturbance = d;
+        LowMachSolver solver(test_device(), g, atm, params, RadiationParams{});
+        solver.reset_to_ambient(WindProfile{});
+        FireballConfig fb;
+        fb.radius = 100.f;
+        fb.temperature = 3000.f;
+        init_fireball(solver, fb, 3);
+        for (int s = 0; s < 20; ++s) {
+            solver.step(0.05);
+            REQUIRE(std::isfinite(solver.max_speed()));
+        }
+        CHECK(solver.max_speed() < 300.f);
+        (d > 0.f ? w_dist : w_ref) = solver.velocity().w.to_host();
+    }
+    // Largest change near the fireball (lowest 8 levels, central 12 x 12 columns) and in the
+    // clean air of the top corners, where the kicks are switched off.
+    const Int3 nw = w_dims(g.dims);
+    double near = 0.0, far = 0.0;
+    for (int k = 1; k < nw.z; ++k)
+        for (int j = 0; j < nw.y; ++j)
+            for (int i = 0; i < nw.x; ++i) {
+                const std::size_t idx = std::size_t(i + nw.x * (j + std::int64_t(nw.y) * k));
+                const double diff = std::fabs(double(w_dist[idx]) - w_ref[idx]);
+                const bool centre = std::abs(i - nw.x / 2) < 6 && std::abs(j - nw.y / 2) < 6 && k < 8;
+                const bool corner = (i < 4 || i >= nw.x - 4) && (j < 4 || j >= nw.y - 4) && k > nw.z - 6;
+                if (centre) near = std::max(near, diff);
+                if (corner) far = std::max(far, diff);
+            }
+    MESSAGE("disturbance changed w by up to " << near << " m/s in the fireball, " << far << " m/s in clean air");
+    CHECK(near > 0.05);
+    CHECK(far < 0.2 * near);
+}

@@ -116,6 +116,7 @@ LowMachSolver::LowMachSolver(Device dev, const GridInfo& grid, const Atmosphere&
         ambient_qv_.allocate(dev, q.size());
         ambient_qv_.upload(q.data(), q.size());
     }
+    if (params_.track_age) age_index_ = count++;
     for (int i = 0; i < count; ++i) scalars_.emplace_back(dev, std::size_t(grid.count()));
 }
 
@@ -402,8 +403,17 @@ void LowMachSolver::cool_and_build_source(float dt) {
     const float expansion = phys::kGravity / (phys::kGamma * phys::kGasConstantAir);
     const MoisturePointers mp = moisture_pointers();
     const float cp = phys::kHeatCapacityAir;
+    // Hot-gas age: smoke * age grows by smoke * dt and restarts wherever the gas is still hot.
+    float* age = age_index_ >= 0 ? scalars_[std::size_t(age_index_)].data() : nullptr;
+    const FieldView sm = smoke();
+    const float t_age = params_.age_temperature;
+    // Smoke and smoke * age are limited separately by the advection, so their ratio can stray at
+    // the thin edges of the cloud; it is kept below the time this stage has run.
+    age_clock_ += dt;
+    const float age_max = age_clock_;
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
         const float ta = t_amb[k];
         const float t = th(i, j, k) * exner[k];
         float t_new = t;
@@ -415,11 +425,14 @@ void LowMachSolver::cool_and_build_source(float dt) {
         }
         if (mp.qv) {
             // Condensation / evaporation at constant pressure, with its latent heat.
-            const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
             float qv = mp.qv[idx], qc = mp.qc[idx];
             t_new += saturation_adjust(t_new, p_amb[k], qv, qc, cp);
             mp.qv[idx] = qv;
             mp.qc[idx] = qc;
+        }
+        if (age) {
+            const float s_ = sm(i, j, k);
+            age[idx] = t_new > t_age ? 0.f : fminf(fmaxf(age[idx] + dt * s_, 0.f), s_ * age_max);
         }
         float s = 0.f;
         if (t_new != t) {
@@ -614,6 +627,54 @@ void LowMachSolver::apply_turbulence(MacField& field, float dt) {
     std::swap(field.v, tmp);
     detail::diffuse_faces(dev_, field.w_view(), {tmp.data(), w_dims(n)}, nu, n, 2, c_mom);
     std::swap(field.w, tmp);
+
+    if (params_.disturbance <= 0.f) return;
+    // Stochastic backscatter. Kick amplitude per cell into tmp_a_ (free again): a Langevin
+    // forcing of strength `disturbance` times the subgrid velocity u_sgs = nu / (C_s dx) with
+    // correlation time 1/|S| = (C_s dx)^2 / nu, i.e. disturbance * u_sgs * sqrt(2 dt |S|) per step
+    // for unit-variance noise, faded out away from the cloud gas.
+    FieldView amp{tmp_a_.data(), n};
+    FieldView th = theta(), sm = smoke();
+    const float* th_a = ambient_.theta.data();
+    const DustPointers dp = dust_pointers();
+    const detail::DustSum dust{{dp.bin[0], dp.bin[1], dp.bin[2]}, dp.count};
+    const float inv_csdx = 1.f / (params_.smagorinsky * dx);
+    const float strength = params_.disturbance / 0.27f;  // the Perlin noise has a spread of about 0.27
+    const float inv_excess = 1.f / params_.confinement_hot_excess;
+    const float inv_dust = 1.f / params_.disturbance_dust;
+    const float max_kick = 0.05f * dx / dt;  // safety net: a kick never moves gas more than 1/20 cell per step
+    parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
+        const std::int64_t idx = i + std::int64_t(n.x) * (j + std::int64_t(n.y) * k);
+        const float nc = nu(i, j, k);
+        const float hot = fmaxf(th(i, j, k) / th_a[k] - 1.f, 0.f) * inv_excess;
+        const float m = fminf(fmaxf(fmaxf(hot, 20.f * sm(i, j, k)), dust.at(idx) * inv_dust), 1.f);
+        amp(i, j, k) = fminf(strength * nc * inv_csdx * sqrtf(fminf(2.f * dt * nc * inv_csdx * inv_csdx, 2.f)), max_kick) * m;
+    });
+    // A new pattern every step, shifted randomly so the noise lattice (where Perlin noise is
+    // zero) does not stay at the same places.
+    const std::uint32_t seed = noise::hash_u32(step_count_ * 0x9e3779b9u + 0x51u);
+    const float f = 1.f / (params_.disturbance_scale * dx);
+    const Float3 shift = make_f3(float(noise::hash_u32(seed + 1u) & 0xffffu), float(noise::hash_u32(seed + 2u) & 0xffffu),
+                                 float(noise::hash_u32(seed + 3u) & 0xffffu)) *
+                         (1.f / 65536.f);
+    const Float3 o = grid_.origin;
+    FieldView u = field.u_view(), v = field.v_view(), w = field.w_view();
+    parallel_for(dev_, u_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = i > 0 ? i - 1 : 0, b = i < n.x ? i : n.x - 1;
+        const Float3 p = (o + make_f3(float(i), j + 0.5f, k + 0.5f) * dx) * f + shift;
+        u(i, j, k) += 0.5f * (amp(a, j, k) + amp(b, j, k)) * noise::perlin(p, seed + 11u);
+    });
+    parallel_for(dev_, v_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        const int a = j > 0 ? j - 1 : 0, b = j < n.y ? j : n.y - 1;
+        const Float3 p = (o + make_f3(i + 0.5f, float(j), k + 0.5f) * dx) * f + shift;
+        v(i, j, k) += 0.5f * (amp(i, a, k) + amp(i, b, k)) * noise::perlin(p, seed + 22u);
+    });
+    parallel_for(dev_, w_dims(n), SIM_LAMBDA(int i, int j, int k) {
+        if (k == 0) return;  // the ground stays impermeable
+        const int b = k < n.z ? k : n.z - 1;
+        const Float3 p = (o + make_f3(i + 0.5f, j + 0.5f, float(k)) * dx) * f + shift;
+        w(i, j, k) += 0.5f * (amp(i, j, k - 1) + amp(i, j, b)) * noise::perlin(p, seed + 33u);
+    });
 }
 
 // Settling (first-order upwind, falling dust leaves through the ground) and lifting of
@@ -684,6 +745,7 @@ StepStats LowMachSolver::step(double dt_d) {
     const Int3 n = grid_.dims;
     StepStats stats;
     stats.dt = dt_d;
+    ++step_count_;
     auto record = [&](const ProjectionStats& p) {
         ++stats.projections;
         stats.pcg_iterations += p.iterations;
@@ -864,6 +926,7 @@ void LowMachSolver::export_field(ExportField field, FieldView out, float flame_t
     const bool has_dust = dp.count > 0;
     const MoisturePointers mp = moisture_pointers();
     const float cond_scale = humidity_.render_scale;
+    const float* age = age_index_ >= 0 ? scalars_[std::size_t(age_index_)].data() : nullptr;
     const int which = int(field);
 
     parallel_for(dev_, n, SIM_LAMBDA(int i, int j, int k) {
@@ -887,6 +950,7 @@ void LowMachSolver::export_field(ExportField field, FieldView out, float flame_t
                 v = hot ? fmaxf(x * x * x * x - xa * xa * xa * xa, 0.f) : 0.f;
                 break;
             }
+            case ExportField::Age: v = (age && s > 1e-4f) ? fminf(fmaxf(age[idx] / s, 0.f), 60.f) : 0.f; break;
             case ExportField::VelX: v = active ? cv.at(i, j, k).x : 0.f; break;
             case ExportField::VelY: v = active ? cv.at(i, j, k).y : 0.f; break;
             case ExportField::VelZ: v = active ? cv.at(i, j, k).z : 0.f; break;

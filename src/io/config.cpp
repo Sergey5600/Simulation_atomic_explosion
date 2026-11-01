@@ -263,6 +263,14 @@ void parse_solver(const toml::table& t, SolverParams& c) {
     if (c.confinement_hot_excess <= 0.f) fail("solver.confinement_hot_excess must be > 0");
     c.smagorinsky = float(get_or<double>(t, "smagorinsky", c.smagorinsky));
     c.turbulent_prandtl = float(get_or<double>(t, "turbulent_prandtl", c.turbulent_prandtl));
+    c.disturbance = float(get_or<double>(t, "disturbance", c.disturbance));
+    c.disturbance_scale = float(get_or<double>(t, "disturbance_scale", c.disturbance_scale));
+    c.disturbance_dust = float(get_or<double>(t, "disturbance_dust", c.disturbance_dust));
+    if (c.disturbance < 0.f || c.disturbance > 1.5f || c.disturbance_scale <= 0.f || c.disturbance_dust <= 0.f) {
+        fail("solver: disturbance must be in [0, 1.5] (above ~1 the flow blows up), disturbance_scale and "
+             "disturbance_dust > 0");
+    }
+    c.age_temperature = float(get_or<double>(t, "age_temperature", c.age_temperature));
     c.pressure_tolerance = float(get_or<double>(t, "pressure_tolerance", c.pressure_tolerance));
     c.pressure_max_iterations = int(get_or<std::int64_t>(t, "pressure_max_iterations", c.pressure_max_iterations));
     if (c.cfl <= 0.f || c.max_dt <= 0.f) fail("solver: cfl and max_dt must be > 0");
@@ -307,6 +315,10 @@ SceneConfig load_scene(const std::string& path) {
     if (const auto* t = subtable(root, "blast")) parse_blast(*t, cfg.blast);
     if (const auto* t = subtable(root, "humidity")) parse_humidity(*t, cfg.humidity);
     if (const auto* t = subtable(root, "detail")) parse_detail(*t, cfg.detail);
+    // The hot-gas age costs a cell field, so it is tracked only when exported.
+    for (const std::string& f : cfg.output.fields) {
+        if (f == "age") cfg.solver.track_age = true;
+    }
     return cfg;
 }
 

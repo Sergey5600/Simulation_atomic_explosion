@@ -46,6 +46,13 @@ public:
     // Weight of field A in the cross-fade at `time`; field B gets 1 - weight.
     float weight_a(double time) const;
 
+    // How far field `field` has been distorted since its last reset, per rest-grid cell, into
+    // `host` (grid().count() floats): |J|^2 / 3 - 1 for the Jacobian J of the rest positions
+    // (Frobenius norm; 0 right after a reset, about 0.7 for a two-fold stretch, capped at 10).
+    // The renderer favours the less distorted field per voxel and fades the detail where both
+    // are stretched. Uses the scratch buffer.
+    void distortion_to_host(int field, float* host) const;
+
     const GridInfo& grid() const { return grid_; }  // the rest grid (twice the simulation voxel)
     // field 0 = A, 1 = B; c = x, y, z.
     const Buffer<float>& component(int field, int c) const { return buf_[3 * field + c]; }
@@ -62,7 +69,7 @@ private:
     GridInfo sim_grid_;
     GridInfo grid_;
     Buffer<float> buf_[6];
-    Buffer<float> tmp_;
+    mutable Buffer<float> tmp_;  // advection output; distortion_to_host scratch
     float length_[2] = {1.f, 1.f};  // m, feature length of each field since its last reset
     long long period_[2] = {0, 0};  // clock periods at the last resets
 };
